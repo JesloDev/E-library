@@ -1,0 +1,83 @@
+import { Book, BookCategory } from './types';
+
+export const DEPARTMENTS = [
+  'Computer Science',
+  'Mathematics',
+  'Physics',
+  'Engineering',
+  'Biological Sciences',
+  'Economics',
+  'Accounting',
+  'Political Science',
+];
+
+export const LEVELS = ['100L', '200L', '300L', '400L', '500L', 'Postgraduate'];
+
+export const INITIAL_BOOKS: Book[] = [
+  {
+    id: '1',
+    title: 'Introduction to Algorithms',
+    author: 'Thomas H. Cormen',
+    category: BookCategory.ACADEMIC,
+    description: 'A comprehensive guide to algorithms and data structures.',
+    coverUrl: 'https://picsum.photos/seed/algo/400/600',
+    downloadUrl: '#',
+    department: 'Computer Science',
+    courseCode: 'CSC 201',
+    courseTitle: 'Data Structures and Algorithms',
+    level: '200L',
+  },
+  {
+    id: '2',
+    title: 'The Pilgrim\'s Progress',
+    author: 'John Bunyan',
+    category: BookCategory.CHRISTIAN_NOVEL,
+    description: 'A classic Christian allegory of the soul\'s journey.',
+    coverUrl: 'https://picsum.photos/seed/pilgrim/400/600',
+    downloadUrl: '#',
+  },
+  {
+    id: '3',
+    title: 'Calculus: Early Transcendentals',
+    author: 'James Stewart',
+    category: BookCategory.ACADEMIC,
+    description: 'Essential calculus concepts for science and engineering.',
+    coverUrl: 'https://picsum.photos/seed/calc/400/600',
+    downloadUrl: '#',
+    department: 'Mathematics',
+    courseCode: 'MTH 101',
+    courseTitle: 'General Mathematics I',
+    level: '100L',
+  },
+  {
+    id: '4',
+    title: 'In His Steps',
+    author: 'Charles Sheldon',
+    category: BookCategory.CHRISTIAN_NOVEL,
+    description: 'What would Jesus do? A challenge to modern discipleship.',
+    coverUrl: 'https://picsum.photos/seed/steps/400/600',
+    downloadUrl: '#',
+  },
+  {
+    id: '5',
+    title: 'Digital Logic Design',
+    author: 'M. Morris Mano',
+    category: BookCategory.ACADEMIC,
+    description: 'Fundamentals of digital systems and logic gates.',
+    coverUrl: 'https://picsum.photos/seed/logic/400/600',
+    downloadUrl: '#',
+    department: 'Engineering',
+    courseCode: 'EEG 202',
+    courseTitle: 'Digital Electronics',
+    level: '200L',
+  },
+  {
+    id: '6',
+    title: 'The Screwtape Letters',
+    author: 'C.S. Lewis',
+    category: BookCategory.CHRISTIAN_NOVEL,
+    description: 'A satirical look at spiritual warfare through demonic correspondence.',
+    coverUrl: 'https://picsum.photos/seed/screwtape/400/600',
+    downloadUrl: '#',
+  },
+];
