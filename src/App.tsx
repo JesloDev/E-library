@@ -31,11 +31,11 @@ import {
   EyeOff
 } from 'lucide-react';
 import * as pdfjsLib from 'pdfjs-dist';
-
-// Set worker source for pdfjs
-pdfjsLib.GlobalWorkerOptions.workerSrc = `//cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.js`;
 import { Book, BookCategory, FilterState, User, RegistrationLink } from './types';
 import { INITIAL_BOOKS, DEPARTMENTS, LEVELS } from './constants';
+
+// Set worker source for pdfjs
+pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -62,6 +62,12 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<string | null>(null);
   const [showPassword, setShowPassword] = useState(false);
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+
+  const showToast = (message: string, type: 'success' | 'error' = 'success') => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 3000);
+  };
 
   const fetchBooks = async () => {
     try {
@@ -126,7 +132,7 @@ export default function App() {
       });
       
       if (res.status === 404) {
-        alert('Login API not found. Please ensure the server is running correctly.');
+        showToast('Login API not found. Please ensure the server is running correctly.', 'error');
         return;
       }
 
@@ -134,12 +140,13 @@ export default function App() {
       if (res.ok) {
         setUser(data.user);
         setView(data.user.isAdmin ? 'admin' : 'library');
+        showToast(`Welcome back, ${data.user.name}!`);
       } else {
-        alert(data.error || 'Login failed');
+        showToast(data.error || 'Login failed', 'error');
       }
     } catch (err) {
       console.error('Login error:', err);
-      alert('Could not connect to the server. Please wait a moment and try again.');
+      showToast('Could not connect to the server. Please wait a moment and try again.', 'error');
     }
   };
 
@@ -158,16 +165,16 @@ export default function App() {
       });
       const data = await res.json();
       if (res.ok) {
-        alert('Registration successful! Please wait for admin approval.');
+        showToast('Registration successful! Please wait for admin approval.');
         setView('login');
         setShowPassword(false);
         setRegToken(null);
         window.history.replaceState({}, '', window.location.pathname);
       } else {
-        alert(data.error);
+        showToast(data.error, 'error');
       }
     } catch (err) {
-      alert('Registration failed');
+      showToast('Registration failed', 'error');
     }
   };
 
@@ -207,33 +214,62 @@ export default function App() {
   const generateLink = async () => {
     try {
       const res = await fetch('/api/admin/generate-link', { method: 'POST' });
+      if (!res.ok) throw new Error('Failed to generate link');
       const data = await res.json();
+      
+      // Optimistic update (though we need the token from server)
+      // We just fetch again to be safe but we could also add it manually if we had the full object
       fetchAdminData();
-    } catch (err) {
-      alert('Failed to generate link');
+      showToast('Registration link generated successfully');
+    } catch (err: any) {
+      showToast(err.message, 'error');
     }
   };
 
   const approveUser = async (userId: string) => {
+    // Optimistic Update
+    const previousUsers = [...pendingUsers];
+    setPendingUsers(prev => prev.filter(u => u.id !== userId));
+    
     try {
-      await fetch('/api/admin/approve-user', {
+      const res = await fetch('/api/admin/approve-user', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ userId }),
       });
-      fetchAdminData();
-    } catch (err) {
-      alert('Failed to approve user');
+      if (!res.ok) throw new Error('Failed to approve user');
+      showToast('User approved successfully');
+    } catch (err: any) {
+      setPendingUsers(previousUsers); // Rollback
+      showToast(err.message, 'error');
+    }
+  };
+
+  const deleteLink = async (id: string) => {
+    if (!confirm('Are you sure you want to revoke this registration link?')) return;
+    
+    // Optimistic Update
+    const previousLinks = [...adminLinks];
+    setAdminLinks(prev => prev.filter(l => l.id !== id));
+
+    try {
+      const res = await fetch(`/api/admin/links/${id}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error('Failed to delete link');
+      showToast('Link revoked successfully');
+    } catch (err: any) {
+      setAdminLinks(previousLinks); // Rollback
+      showToast(err.message, 'error');
     }
   };
 
   const handleAddBook = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
-    const formData = new FormData(e.currentTarget);
+    const form = e.currentTarget;
+    const formData = new FormData(form);
     const file = formData.get('pdf_file') as File;
     
     if (!file) {
-      alert('Please select a PDF file');
+      showToast('Please select a PDF file', 'error');
       return;
     }
 
@@ -266,7 +302,15 @@ export default function App() {
         method: 'POST',
         body: pdfUploadFormData
       });
-      const pdfData = await pdfRes.json();
+      
+      let pdfData;
+      const pdfText = await pdfRes.text();
+      try {
+        pdfData = JSON.parse(pdfText);
+      } catch (e) {
+        throw new Error(`Server returned non-JSON response during PDF upload (${pdfRes.status})`);
+      }
+      
       if (!pdfRes.ok) throw new Error(pdfData.error || 'PDF upload failed');
 
       // 3. Upload Thumbnail
@@ -277,7 +321,15 @@ export default function App() {
         method: 'POST',
         body: thumbUploadFormData
       });
-      const thumbData = await thumbRes.json();
+      
+      let thumbData;
+      const thumbText = await thumbRes.text();
+      try {
+        thumbData = JSON.parse(thumbText);
+      } catch (e) {
+        throw new Error(`Server returned non-JSON response during thumbnail upload (${thumbRes.status})`);
+      }
+      
       if (!thumbRes.ok) throw new Error(thumbData.error || 'Thumbnail upload failed');
 
       // 4. Save Book Record
@@ -305,17 +357,27 @@ export default function App() {
         body: JSON.stringify(bookData),
       });
 
+      let responseData;
+      const responseText = await res.text();
+      try {
+        responseData = JSON.parse(responseText);
+      } catch (e) {
+        throw new Error(`Server returned non-JSON response during record save (${res.status})`);
+      }
+
       if (res.ok) {
-        alert('Book added successfully!');
-        e.currentTarget.reset();
+        showToast('Book added successfully!');
+        form.reset();
+        setFormCategory(BookCategory.ACADEMIC);
+        const label = document.getElementById('pdf-label');
+        if (label) label.innerText = 'Select PDF from local storage';
         fetchAdminData();
       } else {
-        const data = await res.json();
-        alert(data.error || 'Failed to add book');
+        showToast(responseData.error || 'Failed to add book', 'error');
       }
     } catch (err: any) {
       console.error('Upload error:', err);
-      alert(`Error: ${err.message}`);
+      showToast(err.message, 'error');
     } finally {
       setLoading(false);
       setUploadProgress(null);
@@ -324,11 +386,18 @@ export default function App() {
 
   const deleteBook = async (id: string) => {
     if (!confirm('Are you sure you want to delete this book?')) return;
+    
+    // Optimistic Update
+    const previousBooks = [...books];
+    setBooks(prev => prev.filter(b => b.id !== id));
+
     try {
-      await fetch(`/api/admin/books/${id}`, { method: 'DELETE' });
-      fetchAdminData();
-    } catch (err) {
-      alert('Failed to delete book');
+      const res = await fetch(`/api/admin/books/${id}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error('Failed to delete book');
+      showToast('Book deleted successfully');
+    } catch (err: any) {
+      setBooks(previousBooks); // Rollback
+      showToast(err.message, 'error');
     }
   };
 
@@ -502,6 +571,23 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#f8f9fa] text-slate-900 font-sans">
+      {/* Toast Notification */}
+      <AnimatePresence>
+        {toast && (
+          <motion.div
+            initial={{ opacity: 0, y: 50 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 50 }}
+            className={`fixed bottom-8 right-8 z-50 px-6 py-3 rounded-xl shadow-lg flex items-center gap-3 ${
+              toast.type === 'success' ? 'bg-emerald-600 text-white' : 'bg-rose-600 text-white'
+            }`}
+          >
+            {toast.type === 'success' ? <CheckCircle2 size={20} /> : <X size={20} />}
+            <span className="font-medium">{toast.message}</span>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Navigation */}
       <nav className="sticky top-0 z-40 bg-white/80 backdrop-blur-md border-b border-slate-200">
         {dbError && (
@@ -670,16 +756,26 @@ export default function App() {
                       <div key={link.id} className="p-4 bg-slate-50 rounded-2xl border border-slate-100 group">
                         <div className="flex items-center justify-between mb-2">
                           <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Expires in 24h</span>
-                          <button 
-                            onClick={() => {
-                              const url = `${window.location.origin}/?token=${link.token}`;
-                              navigator.clipboard.writeText(url);
-                              alert('Link copied to clipboard!');
-                            }}
-                            className="p-1.5 text-slate-400 hover:text-emerald-600 transition-colors"
-                          >
-                            <Copy className="w-4 h-4" />
-                          </button>
+                          <div className="flex items-center gap-1">
+                            <button 
+                              onClick={() => {
+                                const url = `${window.location.origin}/?token=${link.token}`;
+                                navigator.clipboard.writeText(url);
+                                showToast('Link copied to clipboard!');
+                              }}
+                              className="p-1.5 text-slate-400 hover:text-emerald-600 transition-colors"
+                              title="Copy Link"
+                            >
+                              <Copy className="w-4 h-4" />
+                            </button>
+                            <button 
+                              onClick={() => deleteLink(link.id)}
+                              className="p-1.5 text-slate-400 hover:text-rose-600 transition-colors"
+                              title="Revoke Link"
+                            >
+                              <X className="w-4 h-4" />
+                            </button>
+                          </div>
                         </div>
                         <p className="text-xs font-mono text-slate-500 break-all line-clamp-1">{link.token}</p>
                       </div>
@@ -1079,7 +1175,14 @@ export default function App() {
                   </div>
                 </div>
                 <button 
-                  onClick={() => { setUser(null); setView('login'); setIsNavOpen(false); setShowPassword(false); }}
+                  onClick={() => { 
+                    if (confirm('Are you sure you want to sign out?')) {
+                      setUser(null); 
+                      setView('login'); 
+                      setIsNavOpen(false); 
+                      setShowPassword(false); 
+                    }
+                  }}
                   className="w-full flex items-center gap-3 px-4 py-3 rounded-xl font-bold text-red-500 hover:bg-red-50 transition-all"
                 >
                   <LogOut className="w-5 h-5" />

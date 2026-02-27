@@ -22,6 +22,9 @@ const getTransporter = () => {
       user: process.env.SMTP_USER,
       pass: process.env.SMTP_PASS,
     },
+    connectionTimeout: 10000, // 10 seconds
+    greetingTimeout: 10000,
+    socketTimeout: 10000,
   });
 };
 
@@ -52,8 +55,14 @@ const sendApprovalEmail = async (email: string, name: string) => {
   try {
     await transporter.sendMail(mailOptions);
     console.log(`Approval email sent to ${email}`);
-  } catch (err) {
-    console.error('Failed to send approval email:', err);
+  } catch (err: any) {
+    if (err.code === 'EAUTH' || err.responseCode === 535) {
+      console.error('SMTP Authentication Failed: The username or password was rejected.');
+      console.error('TIP: If using Gmail, you MUST use an "App Password", not your regular account password.');
+      console.error('Visit: https://myaccount.google.com/apppasswords');
+    } else {
+      console.error('Failed to send approval email:', err.message);
+    }
   }
 };
 
@@ -87,6 +96,15 @@ async function startServer() {
   });
 
   // --- API Routes ---
+
+  // Global API Error Handler
+  const apiErrorHandler = (err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    console.error('API Error:', err);
+    res.status(err.status || 500).json({ 
+      error: err.message || 'Internal Server Error',
+      details: process.env.NODE_ENV === 'development' ? err.stack : undefined
+    });
+  };
 
   // Auth
   app.post('/api/auth/login', async (req, res) => {
@@ -234,6 +252,21 @@ async function startServer() {
     }
   });
 
+  app.delete('/api/admin/links/:id', async (req, res) => {
+    try {
+      const supabase = getSupabase();
+      const { error } = await supabase
+        .from('registration_links')
+        .delete()
+        .eq('id', req.params.id);
+      
+      if (error) throw error;
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // Books Management
   app.get('/api/books', async (req, res) => {
     try {
@@ -290,18 +323,44 @@ async function startServer() {
       }
 
       const supabase = getSupabase();
+      const bucketName = 'materials';
+
+      // Ensure bucket exists (best effort)
+      try {
+        const { data: buckets } = await supabase.storage.listBuckets();
+        const exists = buckets?.find((b: any) => b.name === bucketName);
+        if (!exists) {
+          console.log(`Bucket "${bucketName}" not found. Attempting to create...`);
+          const { error: createError } = await supabase.storage.createBucket(bucketName, {
+            public: true,
+            fileSizeLimit: 52428800, // 50MB
+          });
+          if (createError) {
+            console.warn('Could not create bucket automatically:', createError.message);
+            console.warn('Please ensure you have created a public bucket named "materials" in your Supabase dashboard.');
+          }
+        }
+      } catch (e) {
+        console.warn('Error checking/creating bucket:', e);
+      }
+
       const fileName = `${uuidv4()}-${req.file.originalname}`;
       const { data, error } = await supabase.storage
-        .from('materials')
+        .from(bucketName)
         .upload(fileName, req.file.buffer, {
           contentType: req.file.mimetype,
           upsert: true
         });
 
-      if (error) throw error;
+      if (error) {
+        if (error.message.includes('Bucket not found')) {
+          throw new Error('The storage bucket "materials" was not found. Please create a PUBLIC bucket named "materials" in your Supabase dashboard under Storage.');
+        }
+        throw error;
+      }
 
       const { data: { publicUrl } } = supabase.storage
-        .from('materials')
+        .from(bucketName)
         .getPublicUrl(fileName);
 
       res.json({ url: publicUrl });
@@ -310,6 +369,9 @@ async function startServer() {
       res.status(500).json({ error: err.message });
     }
   });
+
+  // Apply API error handler to all /api routes
+  app.use('/api', apiErrorHandler);
 
   // Vite middleware for development
   if (process.env.NODE_ENV !== 'production') {
