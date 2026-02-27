@@ -40,12 +40,12 @@ const sendApprovalEmail = async (email: string, name: string) => {
     to: email,
     subject: 'Account Approved - DLCF E-Library',
     html: `
-      <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; rounded: 12px;">
+      <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 12px;">
         <h2 style="color: #059669;">Welcome to DLCF E-Library!</h2>
         <p>Hello <strong>${name}</strong>,</p>
         <p>Great news! Your account has been approved by the administrator.</p>
         <p>You can now log in to access all academic materials and Christian novels in our library.</p>
-        <div style="margin-top: 30px; padding-top: 20px; border-t: 1px solid #e2e8f0;">
+        <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e2e8f0;">
           <p style="font-size: 14px; color: #64748b;">Best regards,<br>DLCF Admin Team</p>
         </div>
       </div>
@@ -63,6 +63,60 @@ const sendApprovalEmail = async (email: string, name: string) => {
     } else {
       console.error('Failed to send approval email:', err.message);
     }
+  }
+};
+
+const sendLoginNotification = async (email: string, name: string) => {
+  if (!process.env.SMTP_HOST) return;
+  const transporter = getTransporter();
+  const mailOptions = {
+    from: `"DLCF E-Library" <${process.env.SMTP_USER}>`,
+    to: email,
+    subject: 'New Login Detected - DLCF E-Library',
+    html: `
+      <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 12px;">
+        <h2 style="color: #1e293b;">New Login Notification</h2>
+        <p>Hello <strong>${name}</strong>,</p>
+        <p>This is to inform you that a new login was detected on your DLCF E-Library account at ${new Date().toLocaleString()}.</p>
+        <p>If this wasn't you, please contact the administrator immediately.</p>
+        <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e2e8f0;">
+          <p style="font-size: 14px; color: #64748b;">Best regards,<br>DLCF Admin Team</p>
+        </div>
+      </div>
+    `,
+  };
+  try { 
+    await transporter.sendMail(mailOptions);
+    console.log(`Login notification sent to ${email}`);
+  } catch (err: any) { 
+    console.error('Login notification failed:', err.message); 
+  }
+};
+
+const sendWelcomeEmail = async (email: string, name: string) => {
+  if (!process.env.SMTP_HOST) return;
+  const transporter = getTransporter();
+  const mailOptions = {
+    from: `"DLCF E-Library" <${process.env.SMTP_USER}>`,
+    to: email,
+    subject: 'Welcome to DLCF E-Library - Pending Approval',
+    html: `
+      <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 12px;">
+        <h2 style="color: #059669;">Welcome, ${name}!</h2>
+        <p>Thank you for registering with the DLCF E-Library.</p>
+        <p>Your account has been successfully created and is currently <strong>pending approval</strong> by our administrator.</p>
+        <p>You will receive another email once your account has been approved and is ready for use.</p>
+        <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e2e8f0;">
+          <p style="font-size: 14px; color: #64748b;">Best regards,<br>DLCF Admin Team</p>
+        </div>
+      </div>
+    `,
+  };
+  try { 
+    await transporter.sendMail(mailOptions);
+    console.log(`Welcome email sent to ${email}`);
+  } catch (err: any) { 
+    console.error('Welcome email failed:', err.message); 
   }
 };
 
@@ -126,6 +180,9 @@ async function startServer() {
         return res.status(403).json({ error: 'Account pending approval' });
       }
 
+      // Send login notification (async)
+      sendLoginNotification(user.email, user.name);
+
       res.json({ user: { id: user.id, email: user.email, name: user.name, isAdmin: !!user.is_admin } });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -159,6 +216,9 @@ async function startServer() {
         .insert([{ id: uuidv4(), email, password, name, is_approved: false, is_admin: false }]);
       
       if (regError) throw regError;
+
+      // Send welcome email (async)
+      sendWelcomeEmail(email, name);
 
       // Delete the used link
       await supabase.from('registration_links').delete().eq('token', token);
@@ -253,6 +313,7 @@ async function startServer() {
   });
 
   app.delete('/api/admin/links/:id', async (req, res) => {
+    console.log(`Attempting to delete link: ${req.params.id}`);
     try {
       const supabase = getSupabase();
       const { error } = await supabase
@@ -260,7 +321,11 @@ async function startServer() {
         .delete()
         .eq('id', req.params.id);
       
-      if (error) throw error;
+      if (error) {
+        console.error(`Error deleting link ${req.params.id}:`, error.message);
+        throw error;
+      }
+      console.log(`Successfully deleted link: ${req.params.id}`);
       res.json({ success: true });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
@@ -301,6 +366,7 @@ async function startServer() {
   });
 
   app.delete('/api/admin/books/:id', async (req, res) => {
+    console.log(`Attempting to delete book: ${req.params.id}`);
     try {
       const supabase = getSupabase();
       const { error } = await supabase
@@ -308,7 +374,11 @@ async function startServer() {
         .delete()
         .eq('id', req.params.id);
       
-      if (error) throw error;
+      if (error) {
+        console.error(`Error deleting book ${req.params.id}:`, error.message);
+        throw error;
+      }
+      console.log(`Successfully deleted book: ${req.params.id}`);
       res.json({ success: true });
     } catch (err: any) {
       res.status(500).json({ error: err.message });

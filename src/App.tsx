@@ -770,7 +770,7 @@ export default function App() {
                             </button>
                             <button 
                               onClick={() => deleteLink(link.id)}
-                              className="p-1.5 text-slate-400 hover:text-rose-600 transition-colors"
+                              className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-all"
                               title="Revoke Link"
                             >
                               <X className="w-4 h-4" />
@@ -925,7 +925,8 @@ export default function App() {
                         </div>
                         <button 
                           onClick={() => deleteBook(book.id)}
-                          className="p-2 text-slate-300 hover:text-red-500 transition-colors"
+                          className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-xl transition-all"
+                          title="Delete Material"
                         >
                           <X className="w-5 h-5" />
                         </button>
