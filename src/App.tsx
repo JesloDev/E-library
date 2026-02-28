@@ -96,7 +96,9 @@ export default function App() {
         courseCode: b.course_code || b.courseCode,
         courseTitle: b.course_title || b.courseTitle
       }));
-      setBooks(normalized.length > 0 ? normalized : INITIAL_BOOKS);
+      
+      // Only show INITIAL_BOOKS if we are sure the DB is not just empty
+      setBooks(normalized.length > 0 ? normalized : []);
     } catch (err) {
       console.error('Failed to fetch books:', err);
       setBooks(INITIAL_BOOKS);
@@ -246,6 +248,12 @@ export default function App() {
   };
 
   const deleteLink = async (id: string) => {
+    console.log('Attempting to delete link with ID:', id);
+    if (!id) {
+      showToast('Invalid link ID', 'error');
+      return;
+    }
+
     if (!confirm('Are you sure you want to revoke this registration link?')) return;
     
     // Optimistic Update
@@ -253,10 +261,17 @@ export default function App() {
     setAdminLinks(prev => prev.filter(l => l.id !== id));
 
     try {
-      const res = await fetch(`/api/admin/links/${id}`, { method: 'DELETE' });
-      if (!res.ok) throw new Error('Failed to delete link');
+      const res = await fetch(`/api/admin/links/${id}`, { 
+        method: 'DELETE',
+        headers: { 'Accept': 'application/json' }
+      });
+      
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to delete link');
+      
       showToast('Link revoked successfully');
     } catch (err: any) {
+      console.error('Delete link error:', err);
       setAdminLinks(previousLinks); // Rollback
       showToast(err.message, 'error');
     }
@@ -385,17 +400,32 @@ export default function App() {
   };
 
   const deleteBook = async (id: string) => {
-    if (!confirm('Are you sure you want to delete this book?')) return;
+    console.log('Attempting to delete book with ID:', id);
+    // Check if it's a demo book (demo books have short numeric IDs)
+    if (id.length < 10) {
+      setBooks(prev => prev.filter(b => b.id !== id));
+      showToast('Demo book removed from view');
+      return;
+    }
+
+    if (!confirm('Are you sure you want to delete this book? This action cannot be undone.')) return;
     
     // Optimistic Update
     const previousBooks = [...books];
     setBooks(prev => prev.filter(b => b.id !== id));
 
     try {
-      const res = await fetch(`/api/admin/books/${id}`, { method: 'DELETE' });
-      if (!res.ok) throw new Error('Failed to delete book');
+      const res = await fetch(`/api/admin/books/${id}`, { 
+        method: 'DELETE',
+        headers: { 'Accept': 'application/json' }
+      });
+      
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Failed to delete book');
+      
       showToast('Book deleted successfully');
     } catch (err: any) {
+      console.error('Delete book error:', err);
       setBooks(previousBooks); // Rollback
       showToast(err.message, 'error');
     }
