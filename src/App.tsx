@@ -40,7 +40,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLi
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
-  const [view, setView] = useState<'login' | 'register' | 'library' | 'admin' | 'forgot-password'>('login');
+  const [view, setView] = useState<'login' | 'register' | 'library' | 'admin' | 'forgot-password' | 'profile'>('login');
   const [regToken, setRegToken] = useState<string | null>(null);
   
   // Library State
@@ -57,7 +57,7 @@ export default function App() {
   const [revokedModal, setRevokedModal] = useState<{ message: string } | null>(null);
   const [confirmModal, setConfirmModal] = useState<{ 
     id?: string; 
-    type: 'book' | 'link' | 'logout' | 'revoke' | 'restore'; 
+    type: 'book' | 'link' | 'logout' | 'revoke' | 'restore' | 'demote' | 'promote'; 
     title: string;
     message?: string;
     action: () => void;
@@ -65,6 +65,7 @@ export default function App() {
 
   // Admin State
   const [allUsers, setAllUsers] = useState<any[]>([]);
+  const [userSearch, setUserSearch] = useState('');
   const [adminLinks, setAdminLinks] = useState<RegistrationLink[]>([]);
   const [adminTab, setAdminTab] = useState<'users' | 'books'>('users');
   const [formCategory, setFormCategory] = useState<BookCategory>(BookCategory.ACADEMIC);
@@ -241,6 +242,96 @@ export default function App() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const handleUpdateProfile = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const formData = new FormData(e.currentTarget);
+    const name = formData.get('name');
+    const email = formData.get('email');
+    const password = formData.get('password');
+
+    setLoading(true);
+    try {
+      const res = await fetch('/api/user/profile', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: user?.id, name, email, password }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setUser(data.user);
+        localStorage.setItem('dlcf_user', JSON.stringify(data.user));
+        showToast('Profile updated successfully');
+        setView(data.user.isAdmin ? 'admin' : 'library');
+      } else {
+        showToast(data.error || 'Failed to update profile', 'error');
+      }
+    } catch (err) {
+      showToast('Connection error', 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const demoteSelf = () => {
+    setConfirmModal({
+      type: 'demote',
+      title: 'Revoke Admin Rights',
+      message: 'Are you sure you want to revoke your own administrative rights? You will become a standard user and lose access to this dashboard.',
+      action: async () => {
+        try {
+          const res = await fetch('/api/admin/demote-self', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ userId: user?.id }),
+          });
+          if (res.ok) {
+            const updatedUser = { ...user!, isAdmin: false };
+            setUser(updatedUser);
+            localStorage.setItem('dlcf_user', JSON.stringify(updatedUser));
+            showToast('Admin rights revoked successfully');
+            setView('library');
+          } else {
+            const data = await res.json();
+            showToast(data.error || 'Failed to revoke admin rights', 'error');
+          }
+        } catch (err) {
+          showToast('Connection error', 'error');
+        } finally {
+          setConfirmModal(null);
+        }
+      }
+    });
+  };
+
+  const promoteToAdmin = (userId: string, userName: string) => {
+    setConfirmModal({
+      id: userId,
+      type: 'promote',
+      title: 'Promote to Admin',
+      message: `Are you sure you want to promote ${userName} to an Administrator? They will have full access to manage the library.`,
+      action: async () => {
+        try {
+          const res = await fetch('/api/admin/promote-user', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ userId }),
+          });
+          if (res.ok) {
+            showToast(`${userName} has been promoted to Admin`);
+            fetchAdminData();
+          } else {
+            const data = await res.json();
+            showToast(data.error || 'Failed to promote user', 'error');
+          }
+        } catch (err) {
+          showToast('Connection error', 'error');
+        } finally {
+          setConfirmModal(null);
+        }
+      }
+    });
   };
 
   const fetchAdminData = async () => {
@@ -587,6 +678,14 @@ export default function App() {
     });
   }, [books, filters]);
 
+  const filteredUsers = useMemo(() => {
+    if (!userSearch) return allUsers;
+    return allUsers.filter(u => 
+      u.name.toLowerCase().includes(userSearch.toLowerCase()) || 
+      u.email.toLowerCase().includes(userSearch.toLowerCase())
+    );
+  }, [allUsers, userSearch]);
+
   // --- Views ---
 
   if (view === 'login') {
@@ -789,6 +888,82 @@ export default function App() {
     );
   }
 
+  if (view === 'profile') {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+        <motion.div 
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="w-full max-w-md bg-white rounded-3xl shadow-xl shadow-slate-200/50 p-8 border border-slate-100"
+        >
+          <div className="flex flex-col items-center mb-8">
+            <div className="bg-emerald-600 p-3 rounded-2xl mb-4 shadow-lg shadow-emerald-200">
+              <UserIcon className="w-8 h-8 text-white" />
+            </div>
+            <h1 className="text-2xl font-bold text-slate-800">My Profile</h1>
+            <p className="text-slate-500 text-sm text-center">Update your account information</p>
+          </div>
+
+          <form onSubmit={handleUpdateProfile} className="space-y-4">
+            <div>
+              <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1.5 ml-1">Full Name</label>
+              <input 
+                name="name"
+                type="text" 
+                defaultValue={user?.name}
+                required
+                className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1.5 ml-1">Email Address</label>
+              <input 
+                name="email"
+                type="email" 
+                defaultValue={user?.email}
+                required
+                className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
+              />
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1.5 ml-1">New Password (Optional)</label>
+              <div className="relative">
+                <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                <input 
+                  name="password"
+                  type={showPassword ? "text" : "password"} 
+                  placeholder="Leave blank to keep current"
+                  className="w-full pl-11 pr-12 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                  className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 hover:text-emerald-600 transition-colors"
+                >
+                  {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+            </div>
+            <button 
+              type="submit"
+              disabled={loading}
+              className="w-full bg-emerald-600 text-white py-4 rounded-2xl font-bold shadow-lg shadow-emerald-600/20 hover:bg-emerald-700 transition-all active:scale-[0.98] disabled:opacity-50"
+            >
+              {loading ? <Loader2 className="w-5 h-5 animate-spin mx-auto" /> : 'Update Profile'}
+            </button>
+          </form>
+          
+          <button 
+            onClick={() => setView(user?.isAdmin ? 'admin' : 'library')}
+            className="w-full mt-4 text-sm text-slate-500 hover:text-emerald-600 transition-colors"
+          >
+            Cancel
+          </button>
+        </motion.div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#f8f9fa] text-slate-900 font-sans">
       {/* Toast Notification */}
@@ -868,10 +1043,16 @@ export default function App() {
               )}
               <div className="h-6 w-px bg-slate-200 mx-2" />
               <div className="flex items-center gap-3 px-3 py-1.5 bg-slate-50 rounded-full border border-slate-100">
-                <div className="w-6 h-6 rounded-full bg-emerald-100 flex items-center justify-center">
-                  <UserIcon className="w-3.5 h-3.5 text-emerald-600" />
-                </div>
-                <span className="text-xs font-bold text-slate-700">{user?.name}</span>
+                <button 
+                  onClick={() => setView('profile')}
+                  className="flex items-center gap-2 hover:text-emerald-600 transition-colors"
+                >
+                  <div className="w-6 h-6 rounded-full bg-emerald-100 flex items-center justify-center">
+                    <UserIcon className="w-3.5 h-3.5 text-emerald-600" />
+                  </div>
+                  <span className="text-xs font-bold text-slate-700">{user?.name}</span>
+                </button>
+                <div className="w-px h-3 bg-slate-200" />
                 <button 
                   onClick={handleLogout}
                   className="p-1 text-slate-400 hover:text-red-500 transition-colors"
@@ -918,58 +1099,102 @@ export default function App() {
               {/* Member Management */}
               <div className="lg:col-span-2 space-y-6">
                 <div className="bg-white rounded-3xl border border-slate-200 overflow-hidden">
-                  <div className="p-6 border-b border-slate-100 flex items-center justify-between">
-                    <div className="flex items-center gap-3">
-                      <div className="bg-blue-100 p-2 rounded-xl">
-                        <UserIcon className="w-5 h-5 text-blue-600" />
+                  <div className="p-6 border-b border-slate-100 flex flex-col gap-4">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <div className="bg-blue-100 p-2 rounded-xl">
+                          <UserIcon className="w-5 h-5 text-blue-600" />
+                        </div>
+                        <h2 className="text-lg font-bold text-slate-800">Member Directory</h2>
                       </div>
-                      <h2 className="text-lg font-bold text-slate-800">Member Directory</h2>
+                      <span className="px-2.5 py-1 bg-blue-50 text-blue-700 text-xs font-bold rounded-full">
+                        {allUsers.length} Total
+                      </span>
                     </div>
-                    <span className="px-2.5 py-1 bg-blue-50 text-blue-700 text-xs font-bold rounded-full">
-                      {allUsers.length} Registered
-                    </span>
+                    
+                    <div className="relative">
+                      <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                      <input 
+                        type="text"
+                        placeholder="Search members by name or email..."
+                        value={userSearch}
+                        onChange={(e) => setUserSearch(e.target.value)}
+                        className="w-full pl-11 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all"
+                      />
+                    </div>
                   </div>
                   <div className="divide-y divide-slate-50">
-                    {allUsers.length > 0 ? allUsers.map(u => (
+                    {filteredUsers.length > 0 ? filteredUsers.map(u => (
                       <div key={u.id} className="p-6 flex items-center justify-between hover:bg-slate-50/50 transition-colors">
                         <div className="flex items-center gap-4">
-                          <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold ${u.is_approved ? 'bg-emerald-100 text-emerald-600' : 'bg-rose-100 text-rose-600'}`}>
+                          <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold ${u.is_admin ? 'bg-blue-100 text-blue-600' : u.is_approved ? 'bg-emerald-100 text-emerald-600' : 'bg-rose-100 text-rose-600'}`}>
                             {u.name.charAt(0)}
                           </div>
                           <div>
                             <div className="flex items-center gap-2">
                               <h4 className="font-bold text-slate-800">{u.name}</h4>
-                              {!u.is_approved && (
+                              {u.is_admin && (
+                                <span className="px-1.5 py-0.5 bg-blue-50 text-blue-600 text-[10px] font-bold rounded uppercase">Admin</span>
+                              )}
+                              {!u.is_approved && !u.is_admin && (
                                 <span className="px-1.5 py-0.5 bg-rose-50 text-rose-600 text-[10px] font-bold rounded uppercase">Revoked</span>
+                              )}
+                              {u.id === user?.id && (
+                                <span className="px-1.5 py-0.5 bg-slate-100 text-slate-500 text-[10px] font-bold rounded uppercase">You</span>
                               )}
                             </div>
                             <p className="text-sm text-slate-400">{u.email}</p>
                           </div>
                         </div>
-                        <button 
-                          onClick={() => toggleUserAccess(u.id, u.is_approved)}
-                          className={`flex items-center gap-2 px-4 py-2 text-sm font-bold rounded-xl transition-all shadow-lg ${
-                            u.is_approved 
-                              ? 'bg-rose-50 text-rose-600 hover:bg-rose-100 shadow-rose-600/5' 
-                              : 'bg-emerald-600 text-white hover:bg-emerald-700 shadow-emerald-600/10'
-                          }`}
-                        >
-                          {u.is_approved ? (
+                        <div className="flex items-center gap-2">
+                          {u.id === user?.id ? (
+                            <button 
+                              onClick={demoteSelf}
+                              className="flex items-center gap-2 px-4 py-2 text-sm font-bold rounded-xl transition-all shadow-lg bg-amber-50 text-amber-600 hover:bg-amber-100 shadow-amber-600/5"
+                            >
+                              <ShieldAlert className="w-4 h-4" />
+                              Demote Self
+                            </button>
+                          ) : !u.is_admin ? (
                             <>
-                              <EyeOff className="w-4 h-4" />
-                              Revoke Access
+                              <button 
+                                onClick={() => promoteToAdmin(u.id, u.name)}
+                                className="flex items-center gap-2 px-4 py-2 text-sm font-bold rounded-xl transition-all shadow-lg bg-blue-600 text-white hover:bg-blue-700 shadow-blue-600/10"
+                              >
+                                <ShieldCheck className="w-4 h-4" />
+                                Invite Admin
+                              </button>
+                              <button 
+                                onClick={() => toggleUserAccess(u.id, u.is_approved)}
+                                className={`flex items-center gap-2 px-4 py-2 text-sm font-bold rounded-xl transition-all shadow-lg ${
+                                  u.is_approved 
+                                    ? 'bg-rose-50 text-rose-600 hover:bg-rose-100 shadow-rose-600/5' 
+                                    : 'bg-emerald-600 text-white hover:bg-emerald-700 shadow-emerald-600/10'
+                                }`}
+                              >
+                                {u.is_approved ? (
+                                  <>
+                                    <EyeOff className="w-4 h-4" />
+                                    Revoke Access
+                                  </>
+                                ) : (
+                                  <>
+                                    <CheckCircle2 className="w-4 h-4" />
+                                    Restore Access
+                                  </>
+                                )}
+                              </button>
                             </>
                           ) : (
-                            <>
-                              <CheckCircle2 className="w-4 h-4" />
-                              Restore Access
-                            </>
+                            <span className="text-xs text-slate-400 font-medium italic px-4 py-2">
+                              Admin Access Protected
+                            </span>
                           )}
-                        </button>
+                        </div>
                       </div>
                     )) : (
                       <div className="p-12 text-center">
-                        <p className="text-slate-400 text-sm">No members registered yet.</p>
+                        <p className="text-slate-400 text-sm">No members found matching your search.</p>
                       </div>
                     )}
                   </div>
@@ -997,7 +1222,7 @@ export default function App() {
                     {adminLinks.length > 0 ? adminLinks.map(link => (
                       <div key={link.id} className="p-4 bg-slate-50 rounded-2xl border border-slate-100 group">
                         <div className="flex items-center justify-between mb-2">
-                          <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Expires in 24h</span>
+                          <span className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest bg-emerald-50 px-2 py-0.5 rounded-full">Multi-use Link</span>
                           <div className="flex items-center gap-1">
                             <button 
                               onClick={() => {
@@ -1418,6 +1643,13 @@ export default function App() {
                   </div>
                 </div>
                 <button 
+                  onClick={() => { setView('profile'); setIsNavOpen(false); }}
+                  className="w-full flex items-center gap-3 px-4 py-3 rounded-xl font-bold text-slate-600 hover:bg-slate-50 transition-all"
+                >
+                  <UserIcon className="w-5 h-5" />
+                  My Profile
+                </button>
+                <button 
                   onClick={() => { 
                     setConfirmModal({
                       type: 'logout',
@@ -1595,10 +1827,11 @@ export default function App() {
               <div className="flex flex-col items-center text-center">
                 <div className={`p-4 rounded-2xl mb-6 ${
                   confirmModal.type === 'logout' ? 'bg-amber-100' : 
-                  confirmModal.type === 'restore' ? 'bg-emerald-100' : 'bg-rose-100'
+                  confirmModal.type === 'restore' || confirmModal.type === 'promote' ? 'bg-emerald-100' : 
+                  confirmModal.type === 'demote' ? 'bg-amber-100' : 'bg-rose-100'
                 }`}>
-                  {confirmModal.type === 'logout' ? <LogOut className="w-8 h-8 text-amber-600" /> :
-                   confirmModal.type === 'restore' ? <CheckCircle2 className="w-8 h-8 text-emerald-600" /> :
+                  {confirmModal.type === 'logout' || confirmModal.type === 'demote' ? <ShieldAlert className="w-8 h-8 text-amber-600" /> :
+                   confirmModal.type === 'restore' || confirmModal.type === 'promote' ? <CheckCircle2 className="w-8 h-8 text-emerald-600" /> :
                    <X className="w-8 h-8 text-rose-600" />}
                 </div>
                 <h3 className="text-xl font-bold text-slate-800 mb-2">{confirmModal.title}</h3>
@@ -1615,13 +1848,15 @@ export default function App() {
                   <button
                     onClick={confirmModal.action}
                     className={`flex-1 px-4 py-3 text-white font-bold rounded-xl transition-all shadow-lg ${
-                      confirmModal.type === 'restore' ? 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-600/20' :
-                      confirmModal.type === 'logout' ? 'bg-amber-600 hover:bg-amber-700 shadow-amber-600/20' :
+                      confirmModal.type === 'restore' || confirmModal.type === 'promote' ? 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-600/20' :
+                      confirmModal.type === 'logout' || confirmModal.type === 'demote' ? 'bg-amber-600 hover:bg-amber-700 shadow-amber-600/20' :
                       'bg-rose-600 hover:bg-rose-700 shadow-rose-600/20'
                     }`}
                   >
                     {confirmModal.type === 'logout' ? 'Sign Out' : 
-                     confirmModal.type === 'restore' ? 'Restore' : 'Confirm'}
+                     confirmModal.type === 'restore' ? 'Restore' : 
+                     confirmModal.type === 'demote' ? 'Revoke' :
+                     confirmModal.type === 'promote' ? 'Promote' : 'Confirm'}
                   </button>
                 </div>
               </div>

@@ -209,10 +209,6 @@ async function startServer() {
         return res.status(400).json({ error: 'Invalid registration link' });
       }
 
-      if (new Date(link.expires_at) < new Date()) {
-        return res.status(400).json({ error: 'Registration link expired' });
-      }
-
       // Create user (Automatically approved)
       const { error: regError } = await supabase
         .from('users')
@@ -222,9 +218,6 @@ async function startServer() {
 
       // Send welcome email (async)
       sendWelcomeEmail(email, name);
-
-      // Delete the used link
-      await supabase.from('registration_links').delete().eq('token', token);
       
       res.json({ success: true });
     } catch (err: any) {
@@ -234,6 +227,7 @@ async function startServer() {
 
   app.post('/api/auth/forgot-password', async (req, res) => {
     const { email } = req.body;
+    console.log(`[Auth] Forgot password request for: ${email}`);
     try {
       const supabase = getSupabase();
       const { data: user, error } = await supabase
@@ -243,36 +237,87 @@ async function startServer() {
         .single();
       
       if (error || !user) {
+        console.warn(`[Auth] Forgot password: Email not found (${email})`);
         return res.status(404).json({ error: 'Email not found', message: 'No account was found with this email address. Please check and try again.' });
       }
 
       if (!process.env.SMTP_HOST) {
-        return res.status(500).json({ error: 'Email service not configured. Please contact administrator.' });
+        console.error('[Auth] SMTP_HOST is not configured');
+        return res.status(500).json({ error: 'Email service not configured', message: 'The email service is not configured. Please contact the administrator to retrieve your password.' });
       }
 
+      console.log(`[Auth] Attempting to send recovery email to: ${email} via ${process.env.SMTP_HOST}`);
       const transporter = getTransporter();
-      await transporter.sendMail({
-        from: `"DLCF E-Library" <${process.env.SMTP_USER}>`,
-        to: email,
-        subject: 'Password Recovery - DLCF E-Library',
-        html: `
-          <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 12px;">
-            <h2 style="color: #059669;">Password Recovery</h2>
-            <p>Hello <strong>${user.name}</strong>,</p>
-            <p>You requested to recover your password for the DLCF E-Library.</p>
-            <div style="background: #f8fafc; padding: 15px; border-radius: 8px; margin: 20px 0; border: 1px solid #e2e8f0;">
-              <p style="margin: 0; font-size: 14px; color: #64748b;">Your Password:</p>
-              <p style="margin: 5px 0 0 0; font-family: monospace; font-size: 18px; font-bold; color: #1e293b;">${user.password}</p>
+      
+      try {
+        await transporter.sendMail({
+          from: `"DLCF E-Library" <${process.env.SMTP_USER}>`,
+          to: email,
+          subject: 'Password Recovery - DLCF E-Library',
+          html: `
+            <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 12px;">
+              <h2 style="color: #059669;">Password Recovery</h2>
+              <p>Hello <strong>${user.name}</strong>,</p>
+              <p>You requested to recover your password for the DLCF E-Library.</p>
+              <div style="background: #f8fafc; padding: 15px; border-radius: 8px; margin: 20px 0; border: 1px solid #e2e8f0;">
+                <p style="margin: 0; font-size: 14px; color: #64748b;">Your Password:</p>
+                <p style="margin: 5px 0 0 0; font-family: monospace; font-size: 18px; font-bold; color: #1e293b;">${user.password}</p>
+              </div>
+              <p style="font-size: 12px; color: #94a3b8;">If you didn't request this, please change your password immediately or contact an admin.</p>
+              <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e2e8f0;">
+                <p style="font-size: 14px; color: #64748b;">Best regards,<br>DLCF Admin Team</p>
+              </div>
             </div>
-            <p style="font-size: 12px; color: #94a3b8;">If you didn't request this, please change your password immediately or contact an admin.</p>
-            <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e2e8f0;">
-              <p style="font-size: 14px; color: #64748b;">Best regards,<br>DLCF Admin Team</p>
-            </div>
-          </div>
-        `
-      });
+          `
+        });
+        console.log(`[Auth] Recovery email sent successfully to: ${email}`);
+        res.json({ success: true, message: 'Your password has been sent to your email address.' });
+      } catch (mailErr: any) {
+        console.error(`[Auth] Mail delivery failed for ${email}:`, mailErr.message);
+        res.status(500).json({ 
+          error: 'Email delivery failed', 
+          message: `We couldn't send the email. Technical error: ${mailErr.message}. Please contact the admin.` 
+        });
+      }
+    } catch (err: any) {
+      console.error(`[Auth] Forgot password exception for ${email}:`, err);
+      res.status(500).json({ error: err.message });
+    }
+  });
 
-      res.json({ success: true });
+  app.post('/api/user/profile', async (req, res) => {
+    const { userId, email, password, name } = req.body;
+    try {
+      const supabase = getSupabase();
+      
+      // Check if email is already taken by another user
+      if (email) {
+        const { data: existingUser } = await supabase
+          .from('users')
+          .select('id')
+          .eq('email', email)
+          .neq('id', userId)
+          .single();
+        
+        if (existingUser) {
+          return res.status(400).json({ error: 'Email already in use' });
+        }
+      }
+
+      const updates: any = {};
+      if (email) updates.email = email;
+      if (password) updates.password = password;
+      if (name) updates.name = name;
+
+      const { data, error } = await supabase
+        .from('users')
+        .update(updates)
+        .eq('id', userId)
+        .select()
+        .single();
+      
+      if (error) throw error;
+      res.json({ user: { id: data.id, email: data.email, name: data.name, isAdmin: !!data.is_admin } });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -284,12 +329,96 @@ async function startServer() {
       const supabase = getSupabase();
       const { data: users, error } = await supabase
         .from('users')
-        .select('id, email, name, is_approved, created_at')
-        .eq('is_admin', false)
+        .select('id, email, name, is_approved, is_admin, created_at')
         .order('created_at', { ascending: false });
       
       if (error) throw error;
       res.json(users);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/admin/demote-self', async (req, res) => {
+    const { userId } = req.body;
+    try {
+      const supabase = getSupabase();
+      
+      // Get user info for email
+      const { data: user } = await supabase.from('users').select('email, name').eq('id', userId).single();
+
+      const { error } = await supabase
+        .from('users')
+        .update({ is_admin: false })
+        .eq('id', userId);
+      
+      if (error) throw error;
+
+      // Send notification
+      if (user && process.env.SMTP_HOST) {
+        const transporter = getTransporter();
+        await transporter.sendMail({
+          from: `"DLCF E-Library" <${process.env.SMTP_USER}>`,
+          to: user.email,
+          subject: 'Admin Rights Revoked - DLCF E-Library',
+          html: `
+            <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 12px;">
+              <h2 style="color: #f43f5e;">Admin Rights Revoked</h2>
+              <p>Hello <strong>${user.name}</strong>,</p>
+              <p>This is to confirm that you have successfully revoked your own administrative rights. You are now a standard user.</p>
+              <p>If you need admin access again, please contact another administrator.</p>
+              <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e2e8f0;">
+                <p style="font-size: 14px; color: #64748b;">Best regards,<br>DLCF Admin Team</p>
+              </div>
+            </div>
+          `
+        });
+      }
+
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/admin/promote-user', async (req, res) => {
+    const { userId } = req.body;
+    try {
+      const supabase = getSupabase();
+      
+      // Get user info
+      const { data: user } = await supabase.from('users').select('email, name').eq('id', userId).single();
+      if (!user) return res.status(404).json({ error: 'User not found' });
+
+      const { error } = await supabase
+        .from('users')
+        .update({ is_admin: true, is_approved: true })
+        .eq('id', userId);
+      
+      if (error) throw error;
+
+      // Send notification
+      if (process.env.SMTP_HOST) {
+        const transporter = getTransporter();
+        await transporter.sendMail({
+          from: `"DLCF E-Library" <${process.env.SMTP_USER}>`,
+          to: user.email,
+          subject: 'You have been promoted to Admin - DLCF E-Library',
+          html: `
+            <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 12px;">
+              <h2 style="color: #059669;">Admin Promotion</h2>
+              <p>Hello <strong>${user.name}</strong>,</p>
+              <p>Congratulations! You have been promoted to an <strong>Administrator</strong> for the DLCF E-Library.</p>
+              <p>You now have access to the Admin Dashboard where you can manage books, users, and registration links.</p>
+              <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e2e8f0;">
+                <p style="font-size: 14px; color: #64748b;">Best regards,<br>DLCF Admin Team</p>
+              </div>
+            </div>
+          `
+        });
+      }
+
+      res.json({ success: true });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -314,7 +443,7 @@ async function startServer() {
   app.post('/api/admin/generate-link', async (req, res) => {
     const token = uuidv4();
     const expiresAt = new Date();
-    expiresAt.setHours(expiresAt.getHours() + 24); // 24 hours expiry
+    expiresAt.setFullYear(expiresAt.getFullYear() + 100); // 100 years expiry (effectively permanent)
     
     try {
       const supabase = getSupabase();
