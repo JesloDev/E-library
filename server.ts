@@ -139,7 +139,7 @@ function getSupabase() {
 
 async function startServer() {
   const app = express();
-  const PORT = process.env.PORT || 3000;
+  const PORT = parseInt(process.env.PORT || '3000', 10);
 
   app.use(express.json());
 
@@ -177,7 +177,10 @@ async function startServer() {
       }
       
       if (!user.is_approved && !user.is_admin) {
-        return res.status(403).json({ error: 'Account pending approval' });
+        return res.status(403).json({ 
+          error: 'Access Revoked', 
+          message: 'Your access to the DLCF E-Library has been revoked by the administrator. Please contact the admin team if you believe this is an error.' 
+        });
       }
 
       // Send login notification (async)
@@ -210,10 +213,10 @@ async function startServer() {
         return res.status(400).json({ error: 'Registration link expired' });
       }
 
-      // Create user
+      // Create user (Automatically approved)
       const { error: regError } = await supabase
         .from('users')
-        .insert([{ id: uuidv4(), email, password, name, is_approved: false, is_admin: false }]);
+        .insert([{ id: uuidv4(), email, password, name, is_approved: true, is_admin: false }]);
       
       if (regError) throw regError;
 
@@ -229,15 +232,61 @@ async function startServer() {
     }
   });
 
+  app.post('/api/auth/forgot-password', async (req, res) => {
+    const { email } = req.body;
+    try {
+      const supabase = getSupabase();
+      const { data: user, error } = await supabase
+        .from('users')
+        .select('name, password')
+        .eq('email', email)
+        .single();
+      
+      if (error || !user) {
+        return res.status(404).json({ error: 'Email not found', message: 'No account was found with this email address. Please check and try again.' });
+      }
+
+      if (!process.env.SMTP_HOST) {
+        return res.status(500).json({ error: 'Email service not configured. Please contact administrator.' });
+      }
+
+      const transporter = getTransporter();
+      await transporter.sendMail({
+        from: `"DLCF E-Library" <${process.env.SMTP_USER}>`,
+        to: email,
+        subject: 'Password Recovery - DLCF E-Library',
+        html: `
+          <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 12px;">
+            <h2 style="color: #059669;">Password Recovery</h2>
+            <p>Hello <strong>${user.name}</strong>,</p>
+            <p>You requested to recover your password for the DLCF E-Library.</p>
+            <div style="background: #f8fafc; padding: 15px; border-radius: 8px; margin: 20px 0; border: 1px solid #e2e8f0;">
+              <p style="margin: 0; font-size: 14px; color: #64748b;">Your Password:</p>
+              <p style="margin: 5px 0 0 0; font-family: monospace; font-size: 18px; font-bold; color: #1e293b;">${user.password}</p>
+            </div>
+            <p style="font-size: 12px; color: #94a3b8;">If you didn't request this, please change your password immediately or contact an admin.</p>
+            <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e2e8f0;">
+              <p style="font-size: 14px; color: #64748b;">Best regards,<br>DLCF Admin Team</p>
+            </div>
+          </div>
+        `
+      });
+
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // Admin
-  app.get('/api/admin/pending-users', async (req, res) => {
+  app.get('/api/admin/users', async (req, res) => {
     try {
       const supabase = getSupabase();
       const { data: users, error } = await supabase
         .from('users')
-        .select('id, email, name')
-        .eq('is_approved', false)
-        .eq('is_admin', false);
+        .select('id, email, name, is_approved, created_at')
+        .eq('is_admin', false)
+        .order('created_at', { ascending: false });
       
       if (error) throw error;
       res.json(users);
@@ -246,33 +295,16 @@ async function startServer() {
     }
   });
 
-  app.post('/api/admin/approve-user', async (req, res) => {
-    const { userId } = req.body;
+  app.post('/api/admin/toggle-user-access', async (req, res) => {
+    const { userId, isApproved } = req.body;
     try {
       const supabase = getSupabase();
-      
-      // 1. Get user details first
-      const { data: user, error: fetchError } = await supabase
+      const { error } = await supabase
         .from('users')
-        .select('email, name')
-        .eq('id', userId)
-        .single();
-      
-      if (fetchError) throw fetchError;
-
-      // 2. Update approval status
-      const { error: updateError } = await supabase
-        .from('users')
-        .update({ is_approved: true })
+        .update({ is_approved: isApproved })
         .eq('id', userId);
       
-      if (updateError) throw updateError;
-
-      // 3. Send notification email (async)
-      if (user) {
-        sendApprovalEmail(user.email, user.name);
-      }
-
+      if (error) throw error;
       res.json({ success: true });
     } catch (err: any) {
       res.status(500).json({ error: err.message });

@@ -28,7 +28,8 @@ import {
   Loader2,
   Menu,
   Eye,
-  EyeOff
+  EyeOff,
+  ShieldAlert
 } from 'lucide-react';
 import * as pdfjsLib from 'pdfjs-dist';
 import { Book, BookCategory, FilterState, User, RegistrationLink } from './types';
@@ -39,7 +40,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLi
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
-  const [view, setView] = useState<'login' | 'register' | 'library' | 'admin'>('login');
+  const [view, setView] = useState<'login' | 'register' | 'library' | 'admin' | 'forgot-password'>('login');
   const [regToken, setRegToken] = useState<string | null>(null);
   
   // Library State
@@ -53,10 +54,17 @@ export default function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isNavOpen, setIsNavOpen] = useState(false);
   const [dbError, setDbError] = useState<string | null>(null);
-  const [deleteConfirm, setDeleteConfirm] = useState<{ id: string; type: 'book' | 'link'; title: string } | null>(null);
+  const [revokedModal, setRevokedModal] = useState<{ message: string } | null>(null);
+  const [confirmModal, setConfirmModal] = useState<{ 
+    id?: string; 
+    type: 'book' | 'link' | 'logout' | 'revoke' | 'restore'; 
+    title: string;
+    message?: string;
+    action: () => void;
+  } | null>(null);
 
   // Admin State
-  const [pendingUsers, setPendingUsers] = useState<any[]>([]);
+  const [allUsers, setAllUsers] = useState<any[]>([]);
   const [adminLinks, setAdminLinks] = useState<RegistrationLink[]>([]);
   const [adminTab, setAdminTab] = useState<'users' | 'books'>('users');
   const [formCategory, setFormCategory] = useState<BookCategory>(BookCategory.ACADEMIC);
@@ -120,6 +128,21 @@ export default function App() {
     }
   }, []);
 
+  // Restore session from localStorage on mount
+  useEffect(() => {
+    const savedUser = localStorage.getItem('dlcf_user');
+    if (savedUser) {
+      try {
+        const parsedUser = JSON.parse(savedUser);
+        setUser(parsedUser);
+        setView(parsedUser.isAdmin ? 'admin' : 'library');
+      } catch (e) {
+        console.error('Failed to restore session:', e);
+        localStorage.removeItem('dlcf_user');
+      }
+    }
+  }, []);
+
   // API Calls
   const handleLogin = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -142,10 +165,15 @@ export default function App() {
       const data = await res.json();
       if (res.ok) {
         setUser(data.user);
+        localStorage.setItem('dlcf_user', JSON.stringify(data.user));
         setView(data.user.isAdmin ? 'admin' : 'library');
         showToast(`Welcome back, ${data.user.name}!`);
       } else {
-        showToast(data.error || 'Login failed', 'error');
+        if (res.status === 403 && data.error === 'Access Revoked') {
+          setRevokedModal({ message: data.message });
+        } else {
+          showToast(data.error || 'Login failed', 'error');
+        }
       }
     } catch (err) {
       console.error('Login error:', err);
@@ -181,16 +209,50 @@ export default function App() {
     }
   };
 
+  const handleLogout = () => {
+    setUser(null);
+    localStorage.removeItem('dlcf_user');
+    setView('login');
+    setShowPassword(false);
+    setIsNavOpen(false);
+  };
+
+  const handleForgotPassword = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const formData = new FormData(e.currentTarget);
+    const email = formData.get('email');
+
+    setLoading(true);
+    try {
+      const res = await fetch('/api/auth/forgot-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        showToast(data.message || 'Password recovery email sent!');
+        setView('login');
+      } else {
+        showToast(data.message || data.error || 'Failed to process request', 'error');
+      }
+    } catch (err) {
+      showToast('Connection error', 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const fetchAdminData = async () => {
     if (!user?.isAdmin) return;
     try {
       const [usersRes, linksRes, booksRes] = await Promise.all([
-        fetch('/api/admin/pending-users'),
+        fetch('/api/admin/users'),
         fetch('/api/admin/links'),
         fetch('/api/books')
       ]);
 
-      if (usersRes.ok) setPendingUsers(await usersRes.json());
+      if (usersRes.ok) setAllUsers(await usersRes.json());
       if (linksRes.ok) setAdminLinks(await linksRes.json());
       
       if (booksRes.ok) {
@@ -229,22 +291,46 @@ export default function App() {
     }
   };
 
-  const approveUser = async (userId: string) => {
+  const toggleUserAccess = async (userId: string, currentStatus: boolean) => {
+    const newStatus = !currentStatus;
+    
+    if (!currentStatus) { // Restoring access
+      setConfirmModal({
+        id: userId,
+        type: 'restore',
+        title: 'Restore Access',
+        message: 'Are you sure you want to restore access for this user?',
+        action: () => executeToggleUserAccess(userId, newStatus)
+      });
+    } else { // Revoking access
+      setConfirmModal({
+        id: userId,
+        type: 'revoke',
+        title: 'Revoke Access',
+        message: 'Are you sure you want to revoke access for this user? They will no longer be able to log in.',
+        action: () => executeToggleUserAccess(userId, newStatus)
+      });
+    }
+  };
+
+  const executeToggleUserAccess = async (userId: string, newStatus: boolean) => {
     // Optimistic Update
-    const previousUsers = [...pendingUsers];
-    setPendingUsers(prev => prev.filter(u => u.id !== userId));
+    const previousUsers = [...allUsers];
+    setAllUsers(prev => prev.map(u => u.id === userId ? { ...u, is_approved: newStatus } : u));
     
     try {
-      const res = await fetch('/api/admin/approve-user', {
+      const res = await fetch('/api/admin/toggle-user-access', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId }),
+        body: JSON.stringify({ userId, isApproved: newStatus }),
       });
-      if (!res.ok) throw new Error('Failed to approve user');
-      showToast('User approved successfully');
+      if (!res.ok) throw new Error('Failed to update user access');
+      showToast(`User access ${newStatus ? 'restored' : 'revoked'} successfully`);
     } catch (err: any) {
-      setPendingUsers(previousUsers); // Rollback
+      setAllUsers(previousUsers); // Rollback
       showToast(err.message, 'error');
+    } finally {
+      setConfirmModal(null);
     }
   };
 
@@ -256,10 +342,12 @@ export default function App() {
     }
 
     const link = adminLinks.find(l => l.id === id);
-    setDeleteConfirm({ 
+    setConfirmModal({ 
       id, 
       type: 'link', 
-      title: `Registration Link (${link?.token.substring(0, 8)}...)` 
+      title: 'Revoke Link',
+      message: `Are you sure you want to revoke this registration link (${link?.token.substring(0, 8)}...)?`,
+      action: () => executeDeleteLink(id)
     });
   };
 
@@ -292,7 +380,7 @@ export default function App() {
       setAdminLinks(previousLinks); // Rollback
       showToast(err.message || 'Failed to revoke link', 'error');
     } finally {
-      setDeleteConfirm(null);
+      setConfirmModal(null);
     }
   };
 
@@ -435,10 +523,12 @@ export default function App() {
     }
 
     const book = books.find(b => b.id === id);
-    setDeleteConfirm({ 
+    setConfirmModal({ 
       id, 
       type: 'book', 
-      title: book?.title || 'this book' 
+      title: 'Delete Material',
+      message: `Are you sure you want to delete "${book?.title || 'this book'}"? This action cannot be undone.`,
+      action: () => executeDeleteBook(id)
     });
   };
 
@@ -471,7 +561,7 @@ export default function App() {
       setBooks(previousBooks); // Rollback
       showToast(err.message || 'Failed to delete book', 'error');
     } finally {
-      setDeleteConfirm(null);
+      setConfirmModal(null);
     }
   };
 
@@ -556,6 +646,15 @@ export default function App() {
               Sign In
             </button>
           </form>
+          
+          <div className="mt-4 text-center">
+            <button 
+              onClick={() => setView('forgot-password')}
+              className="text-sm text-slate-500 hover:text-emerald-600 transition-colors"
+            >
+              Forgot Password?
+            </button>
+          </div>
           
           <div className="mt-8 pt-6 border-t border-slate-100 text-center">
             <p className="text-xs text-slate-400">
@@ -643,21 +742,72 @@ export default function App() {
     );
   }
 
+  if (view === 'forgot-password') {
+    return (
+      <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+        <motion.div 
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="w-full max-w-md bg-white rounded-3xl shadow-xl shadow-slate-200/50 p-8 border border-slate-100"
+        >
+          <div className="flex flex-col items-center mb-8">
+            <div className="bg-emerald-600 p-3 rounded-2xl mb-4 shadow-lg shadow-emerald-200">
+              <ShieldCheck className="w-8 h-8 text-white" />
+            </div>
+            <h1 className="text-2xl font-bold text-slate-800">Recover Password</h1>
+            <p className="text-slate-500 text-sm text-center">Enter your email to receive your password</p>
+          </div>
+
+          <form onSubmit={handleForgotPassword} className="space-y-4">
+            <div>
+              <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1.5 ml-1">Email Address</label>
+              <input 
+                name="email"
+                type="email" 
+                required
+                placeholder="john@example.com"
+                className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
+              />
+            </div>
+            <button 
+              type="submit"
+              disabled={loading}
+              className="w-full bg-emerald-600 text-white py-4 rounded-2xl font-bold shadow-lg shadow-emerald-600/20 hover:bg-emerald-700 transition-all active:scale-[0.98] disabled:opacity-50"
+            >
+              {loading ? <Loader2 className="w-5 h-5 animate-spin mx-auto" /> : 'Send Password'}
+            </button>
+          </form>
+          
+          <button 
+            onClick={() => setView('login')}
+            className="w-full mt-4 text-sm text-slate-500 hover:text-emerald-600 transition-colors"
+          >
+            Back to Login
+          </button>
+        </motion.div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-[#f8f9fa] text-slate-900 font-sans">
       {/* Toast Notification */}
       <AnimatePresence>
         {toast && (
           <motion.div
-            initial={{ opacity: 0, y: 50 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: 50 }}
-            className={`fixed bottom-8 right-8 z-50 px-6 py-3 rounded-xl shadow-lg flex items-center gap-3 ${
-              toast.type === 'success' ? 'bg-emerald-600 text-white' : 'bg-rose-600 text-white'
+            initial={{ opacity: 0, y: 50, scale: 0.9 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 20, scale: 0.9 }}
+            className={`fixed bottom-8 right-8 z-[110] px-6 py-4 rounded-2xl shadow-2xl flex items-center gap-4 border ${
+              toast.type === 'success' 
+                ? 'bg-emerald-600 border-emerald-500 text-white' 
+                : 'bg-rose-600 border-rose-500 text-white'
             }`}
           >
-            {toast.type === 'success' ? <CheckCircle2 size={20} /> : <X size={20} />}
-            <span className="font-medium">{toast.message}</span>
+            <div className={`p-2 rounded-xl ${toast.type === 'success' ? 'bg-white/20' : 'bg-white/20'}`}>
+              {toast.type === 'success' ? <CheckCircle2 size={20} /> : <X size={20} />}
+            </div>
+            <span className="font-bold tracking-tight">{toast.message}</span>
           </motion.div>
         )}
       </AnimatePresence>
@@ -723,7 +873,7 @@ export default function App() {
                 </div>
                 <span className="text-xs font-bold text-slate-700">{user?.name}</span>
                 <button 
-                  onClick={() => { setUser(null); setView('login'); setShowPassword(false); }}
+                  onClick={handleLogout}
                   className="p-1 text-slate-400 hover:text-red-500 transition-colors"
                 >
                   <LogOut className="w-4 h-4" />
@@ -765,43 +915,61 @@ export default function App() {
 
           {adminTab === 'users' ? (
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-              {/* Pending Approvals */}
+              {/* Member Management */}
               <div className="lg:col-span-2 space-y-6">
                 <div className="bg-white rounded-3xl border border-slate-200 overflow-hidden">
                   <div className="p-6 border-b border-slate-100 flex items-center justify-between">
                     <div className="flex items-center gap-3">
-                      <div className="bg-amber-100 p-2 rounded-xl">
-                        <Clock className="w-5 h-5 text-amber-600" />
+                      <div className="bg-blue-100 p-2 rounded-xl">
+                        <UserIcon className="w-5 h-5 text-blue-600" />
                       </div>
-                      <h2 className="text-lg font-bold text-slate-800">Pending Approvals</h2>
+                      <h2 className="text-lg font-bold text-slate-800">Member Directory</h2>
                     </div>
-                    <span className="px-2.5 py-1 bg-amber-50 text-amber-700 text-xs font-bold rounded-full">
-                      {pendingUsers.length} Requests
+                    <span className="px-2.5 py-1 bg-blue-50 text-blue-700 text-xs font-bold rounded-full">
+                      {allUsers.length} Registered
                     </span>
                   </div>
                   <div className="divide-y divide-slate-50">
-                    {pendingUsers.length > 0 ? pendingUsers.map(u => (
+                    {allUsers.length > 0 ? allUsers.map(u => (
                       <div key={u.id} className="p-6 flex items-center justify-between hover:bg-slate-50/50 transition-colors">
                         <div className="flex items-center gap-4">
-                          <div className="w-10 h-10 rounded-full bg-slate-100 flex items-center justify-center text-slate-500 font-bold">
+                          <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold ${u.is_approved ? 'bg-emerald-100 text-emerald-600' : 'bg-rose-100 text-rose-600'}`}>
                             {u.name.charAt(0)}
                           </div>
                           <div>
-                            <h4 className="font-bold text-slate-800">{u.name}</h4>
+                            <div className="flex items-center gap-2">
+                              <h4 className="font-bold text-slate-800">{u.name}</h4>
+                              {!u.is_approved && (
+                                <span className="px-1.5 py-0.5 bg-rose-50 text-rose-600 text-[10px] font-bold rounded uppercase">Revoked</span>
+                              )}
+                            </div>
                             <p className="text-sm text-slate-400">{u.email}</p>
                           </div>
                         </div>
                         <button 
-                          onClick={() => approveUser(u.id)}
-                          className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white text-sm font-bold rounded-xl hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-600/10"
+                          onClick={() => toggleUserAccess(u.id, u.is_approved)}
+                          className={`flex items-center gap-2 px-4 py-2 text-sm font-bold rounded-xl transition-all shadow-lg ${
+                            u.is_approved 
+                              ? 'bg-rose-50 text-rose-600 hover:bg-rose-100 shadow-rose-600/5' 
+                              : 'bg-emerald-600 text-white hover:bg-emerald-700 shadow-emerald-600/10'
+                          }`}
                         >
-                          <CheckCircle2 className="w-4 h-4" />
-                          Approve
+                          {u.is_approved ? (
+                            <>
+                              <EyeOff className="w-4 h-4" />
+                              Revoke Access
+                            </>
+                          ) : (
+                            <>
+                              <CheckCircle2 className="w-4 h-4" />
+                              Restore Access
+                            </>
+                          )}
                         </button>
                       </div>
                     )) : (
                       <div className="p-12 text-center">
-                        <p className="text-slate-400 text-sm">No pending registration requests.</p>
+                        <p className="text-slate-400 text-sm">No members registered yet.</p>
                       </div>
                     )}
                   </div>
@@ -1251,12 +1419,12 @@ export default function App() {
                 </div>
                 <button 
                   onClick={() => { 
-                    if (confirm('Are you sure you want to sign out?')) {
-                      setUser(null); 
-                      setView('login'); 
-                      setIsNavOpen(false); 
-                      setShowPassword(false); 
-                    }
+                    setConfirmModal({
+                      type: 'logout',
+                      title: 'Sign Out',
+                      message: 'Are you sure you want to sign out of your account?',
+                      action: handleLogout
+                    });
                   }}
                   className="w-full flex items-center gap-3 px-4 py-3 rounded-xl font-bold text-red-500 hover:bg-red-50 transition-all"
                 >
@@ -1370,15 +1538,15 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      {/* Confirmation Modal */}
+      {/* Revoked Access Modal */}
       <AnimatePresence>
-        {deleteConfirm && (
+        {revokedModal && (
           <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
             <motion.div
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              onClick={() => setDeleteConfirm(null)}
+              onClick={() => setRevokedModal(null)}
               className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
             />
             <motion.div
@@ -1389,28 +1557,71 @@ export default function App() {
             >
               <div className="flex flex-col items-center text-center">
                 <div className="bg-rose-100 p-4 rounded-2xl mb-6">
-                  <X className="w-8 h-8 text-rose-600" />
+                  <ShieldAlert className="w-8 h-8 text-rose-600" />
                 </div>
-                <h3 className="text-xl font-bold text-slate-800 mb-2">Are you sure?</h3>
+                <h3 className="text-xl font-bold text-slate-800 mb-2">Access Revoked</h3>
                 <p className="text-slate-500 text-sm mb-8">
-                  You are about to delete <span className="font-bold text-slate-700">"{deleteConfirm.title}"</span>. 
-                  This action cannot be undone.
+                  {revokedModal.message}
+                </p>
+                <button
+                  onClick={() => setRevokedModal(null)}
+                  className="w-full px-4 py-3 bg-slate-900 text-white font-bold rounded-xl hover:bg-slate-800 transition-all shadow-lg shadow-slate-900/20"
+                >
+                  Understood
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Confirmation Modal */}
+      <AnimatePresence>
+        {confirmModal && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setConfirmModal(null)}
+              className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="relative w-full max-w-sm bg-white rounded-3xl shadow-2xl p-8 border border-slate-100"
+            >
+              <div className="flex flex-col items-center text-center">
+                <div className={`p-4 rounded-2xl mb-6 ${
+                  confirmModal.type === 'logout' ? 'bg-amber-100' : 
+                  confirmModal.type === 'restore' ? 'bg-emerald-100' : 'bg-rose-100'
+                }`}>
+                  {confirmModal.type === 'logout' ? <LogOut className="w-8 h-8 text-amber-600" /> :
+                   confirmModal.type === 'restore' ? <CheckCircle2 className="w-8 h-8 text-emerald-600" /> :
+                   <X className="w-8 h-8 text-rose-600" />}
+                </div>
+                <h3 className="text-xl font-bold text-slate-800 mb-2">{confirmModal.title}</h3>
+                <p className="text-slate-500 text-sm mb-8">
+                  {confirmModal.message}
                 </p>
                 <div className="flex gap-3 w-full">
                   <button
-                    onClick={() => setDeleteConfirm(null)}
+                    onClick={() => setConfirmModal(null)}
                     className="flex-1 px-4 py-3 bg-slate-100 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition-colors"
                   >
                     Cancel
                   </button>
                   <button
-                    onClick={() => {
-                      if (deleteConfirm.type === 'book') executeDeleteBook(deleteConfirm.id);
-                      else executeDeleteLink(deleteConfirm.id);
-                    }}
-                    className="flex-1 px-4 py-3 bg-rose-600 text-white font-bold rounded-xl hover:bg-rose-700 transition-all shadow-lg shadow-rose-600/20"
+                    onClick={confirmModal.action}
+                    className={`flex-1 px-4 py-3 text-white font-bold rounded-xl transition-all shadow-lg ${
+                      confirmModal.type === 'restore' ? 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald-600/20' :
+                      confirmModal.type === 'logout' ? 'bg-amber-600 hover:bg-amber-700 shadow-amber-600/20' :
+                      'bg-rose-600 hover:bg-rose-700 shadow-rose-600/20'
+                    }`}
                   >
-                    Delete
+                    {confirmModal.type === 'logout' ? 'Sign Out' : 
+                     confirmModal.type === 'restore' ? 'Restore' : 'Confirm'}
                   </button>
                 </div>
               </div>
