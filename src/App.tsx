@@ -53,6 +53,7 @@ export default function App() {
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isNavOpen, setIsNavOpen] = useState(false);
   const [dbError, setDbError] = useState<string | null>(null);
+  const [deleteConfirm, setDeleteConfirm] = useState<{ id: string; type: 'book' | 'link'; title: string } | null>(null);
 
   // Admin State
   const [pendingUsers, setPendingUsers] = useState<any[]>([]);
@@ -248,14 +249,21 @@ export default function App() {
   };
 
   const deleteLink = async (id: string) => {
-    console.log('Attempting to delete link with ID:', id);
+    console.log('[Frontend] Attempting to delete link with ID:', id);
     if (!id) {
       showToast('Invalid link ID', 'error');
       return;
     }
 
-    if (!confirm('Are you sure you want to revoke this registration link?')) return;
-    
+    const link = adminLinks.find(l => l.id === id);
+    setDeleteConfirm({ 
+      id, 
+      type: 'link', 
+      title: `Registration Link (${link?.token.substring(0, 8)}...)` 
+    });
+  };
+
+  const executeDeleteLink = async (id: string) => {
     // Optimistic Update
     const previousLinks = [...adminLinks];
     setAdminLinks(prev => prev.filter(l => l.id !== id));
@@ -266,14 +274,25 @@ export default function App() {
         headers: { 'Accept': 'application/json' }
       });
       
-      const data = await res.json();
+      let data;
+      const text = await res.text();
+      try {
+        data = JSON.parse(text);
+      } catch (e) {
+        console.error('[Frontend] Failed to parse delete link response:', text);
+        throw new Error('Server returned an invalid response');
+      }
+
       if (!res.ok) throw new Error(data.error || 'Failed to delete link');
       
+      console.log('[Frontend] Link revoked successfully');
       showToast('Link revoked successfully');
     } catch (err: any) {
-      console.error('Delete link error:', err);
+      console.error('[Frontend] Delete link error:', err);
       setAdminLinks(previousLinks); // Rollback
-      showToast(err.message, 'error');
+      showToast(err.message || 'Failed to revoke link', 'error');
+    } finally {
+      setDeleteConfirm(null);
     }
   };
 
@@ -400,16 +419,30 @@ export default function App() {
   };
 
   const deleteBook = async (id: string) => {
-    console.log('Attempting to delete book with ID:', id);
-    // Check if it's a demo book (demo books have short numeric IDs)
-    if (id.length < 10) {
+    console.log('[Frontend] Attempting to delete book with ID:', id);
+    if (!id) {
+      showToast('Invalid book ID', 'error');
+      return;
+    }
+
+    // Check if it's a demo book (demo books have short numeric IDs in our constants)
+    const isDemoBook = String(id).length < 10;
+    if (isDemoBook) {
+      console.log('[Frontend] Removing demo book from view');
       setBooks(prev => prev.filter(b => b.id !== id));
       showToast('Demo book removed from view');
       return;
     }
 
-    if (!confirm('Are you sure you want to delete this book? This action cannot be undone.')) return;
-    
+    const book = books.find(b => b.id === id);
+    setDeleteConfirm({ 
+      id, 
+      type: 'book', 
+      title: book?.title || 'this book' 
+    });
+  };
+
+  const executeDeleteBook = async (id: string) => {
     // Optimistic Update
     const previousBooks = [...books];
     setBooks(prev => prev.filter(b => b.id !== id));
@@ -420,14 +453,25 @@ export default function App() {
         headers: { 'Accept': 'application/json' }
       });
       
-      const data = await res.json();
+      let data;
+      const text = await res.text();
+      try {
+        data = JSON.parse(text);
+      } catch (e) {
+        console.error('[Frontend] Failed to parse delete book response:', text);
+        throw new Error('Server returned an invalid response');
+      }
+
       if (!res.ok) throw new Error(data.error || 'Failed to delete book');
       
+      console.log('[Frontend] Book deleted successfully');
       showToast('Book deleted successfully');
     } catch (err: any) {
-      console.error('Delete book error:', err);
+      console.error('[Frontend] Delete book error:', err);
       setBooks(previousBooks); // Rollback
-      showToast(err.message, 'error');
+      showToast(err.message || 'Failed to delete book', 'error');
+    } finally {
+      setDeleteConfirm(null);
     }
   };
 
@@ -1323,6 +1367,55 @@ export default function App() {
               </div>
             </motion.div>
           </>
+        )}
+      </AnimatePresence>
+
+      {/* Confirmation Modal */}
+      <AnimatePresence>
+        {deleteConfirm && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setDeleteConfirm(null)}
+              className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="relative w-full max-w-sm bg-white rounded-3xl shadow-2xl p-8 border border-slate-100"
+            >
+              <div className="flex flex-col items-center text-center">
+                <div className="bg-rose-100 p-4 rounded-2xl mb-6">
+                  <X className="w-8 h-8 text-rose-600" />
+                </div>
+                <h3 className="text-xl font-bold text-slate-800 mb-2">Are you sure?</h3>
+                <p className="text-slate-500 text-sm mb-8">
+                  You are about to delete <span className="font-bold text-slate-700">"{deleteConfirm.title}"</span>. 
+                  This action cannot be undone.
+                </p>
+                <div className="flex gap-3 w-full">
+                  <button
+                    onClick={() => setDeleteConfirm(null)}
+                    className="flex-1 px-4 py-3 bg-slate-100 text-slate-600 font-bold rounded-xl hover:bg-slate-200 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (deleteConfirm.type === 'book') executeDeleteBook(deleteConfirm.id);
+                      else executeDeleteLink(deleteConfirm.id);
+                    }}
+                    className="flex-1 px-4 py-3 bg-rose-600 text-white font-bold rounded-xl hover:bg-rose-700 transition-all shadow-lg shadow-rose-600/20"
+                  >
+                    Delete
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
         )}
       </AnimatePresence>
 

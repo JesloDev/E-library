@@ -139,7 +139,7 @@ function getSupabase() {
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  const PORT = process.env.PORT || 3000;
 
   app.use(express.json());
 
@@ -313,21 +313,27 @@ async function startServer() {
   });
 
   app.delete('/api/admin/links/:id', async (req, res) => {
-    console.log(`Attempting to delete link: ${req.params.id}`);
+    const { id } = req.params;
+    console.log(`[Admin] Attempting to delete link: ${id}`);
     try {
+      if (!id) {
+        return res.status(400).json({ error: 'Link ID is required' });
+      }
       const supabase = getSupabase();
-      const { error } = await supabase
+      const { error, count } = await supabase
         .from('registration_links')
-        .delete()
-        .eq('id', req.params.id);
+        .delete({ count: 'exact' })
+        .eq('id', id);
       
       if (error) {
-        console.error(`Error deleting link ${req.params.id}:`, error.message);
+        console.error(`[Admin] Error deleting link ${id}:`, error.message);
         throw error;
       }
-      console.log(`Successfully deleted link: ${req.params.id}`);
-      res.json({ success: true });
+      
+      console.log(`[Admin] Successfully deleted link: ${id}. Rows affected: ${count}`);
+      res.json({ success: true, deleted: count });
     } catch (err: any) {
+      console.error(`[Admin] Exception in delete link ${id}:`, err);
       res.status(500).json({ error: err.message });
     }
   });
@@ -366,21 +372,27 @@ async function startServer() {
   });
 
   app.delete('/api/admin/books/:id', async (req, res) => {
-    console.log(`Attempting to delete book: ${req.params.id}`);
+    const { id } = req.params;
+    console.log(`[Admin] Attempting to delete book: ${id}`);
     try {
+      if (!id) {
+        return res.status(400).json({ error: 'Book ID is required' });
+      }
       const supabase = getSupabase();
-      const { error } = await supabase
+      const { error, count } = await supabase
         .from('books')
-        .delete()
-        .eq('id', req.params.id);
+        .delete({ count: 'exact' })
+        .eq('id', id);
       
       if (error) {
-        console.error(`Error deleting book ${req.params.id}:`, error.message);
+        console.error(`[Admin] Error deleting book ${id}:`, error.message);
         throw error;
       }
-      console.log(`Successfully deleted book: ${req.params.id}`);
-      res.json({ success: true });
+      
+      console.log(`[Admin] Successfully deleted book: ${id}. Rows affected: ${count}`);
+      res.json({ success: true, deleted: count });
     } catch (err: any) {
+      console.error(`[Admin] Exception in delete book ${id}:`, err);
       res.status(500).json({ error: err.message });
     }
   });
