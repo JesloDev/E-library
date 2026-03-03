@@ -789,6 +789,21 @@ async function startServer() {
             continue;
           }
 
+          // Auto-detect material type for academic materials
+          let detectedMaterialType = materialType || 'Course Material';
+          if (category === 'Academic Materials') {
+            const lowerName = file.name?.toLowerCase() || '';
+            if (lowerName.includes('pq') || 
+                lowerName.includes('past question') || 
+                lowerName.includes('exam') || 
+                lowerName.includes('test') || 
+                lowerName.includes('quiz')) {
+              detectedMaterialType = 'Past Question';
+            } else {
+              detectedMaterialType = 'Course Material';
+            }
+          }
+
           const bookData = {
             id: uuidv4(),
             title,
@@ -798,7 +813,7 @@ async function startServer() {
             level,
             course_code: courseCode,
             course_title: title,
-            material_type: materialType || 'Course Material',
+            material_type: detectedMaterialType,
             download_url: publicUrl,
             cover_url: 'https://picsum.photos/seed/book/400/600', // Default cover for mass upload
             description: `Mass uploaded from Google Drive: ${file.name}`

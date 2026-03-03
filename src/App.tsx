@@ -29,7 +29,8 @@ import {
   Menu,
   Eye,
   EyeOff,
-  ShieldAlert
+  ShieldAlert,
+  Info
 } from 'lucide-react';
 import * as pdfjsLib from 'pdfjs-dist';
 import { Book, BookCategory, FilterState, User, RegistrationLink } from './types';
@@ -1420,14 +1421,18 @@ export default function App() {
                     {massUploadCategory === BookCategory.ACADEMIC && (
                       <div className="md:col-span-1">
                         <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 ml-1">
-                          Course Code (Optional)
+                          Course Code
                         </label>
                         <input 
                           name="courseCode"
                           type="text" 
-                          placeholder="e.g. CSC 101 (Leave blank to extract from filename)"
+                          required
+                          placeholder="e.g. CSC 101"
                           className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
                         />
+                        <p className="mt-1.5 text-[10px] text-slate-400 ml-1 italic">
+                          Note: Please copy the link per course folder (e.g., CSC 101 folder) to ensure files are correctly categorized. Avoid pasting links to parent folders containing multiple subfolders.
+                        </p>
                       </div>
                     )}
 
@@ -1473,16 +1478,9 @@ export default function App() {
                       </div>
 
                       {massUploadCategory === BookCategory.ACADEMIC && (
-                        <div>
-                          <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 ml-1">Material Type</label>
-                          <select 
-                            name="materialType"
-                            required
-                            className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
-                          >
-                            <option value="Course Material">Course Material</option>
-                            <option value="Past Question">Past Question</option>
-                          </select>
+                        <div className="flex items-center gap-2 px-4 py-3 bg-blue-50 text-blue-700 rounded-2xl text-xs font-medium">
+                          <Info className="w-4 h-4" />
+                          <span>Material types (Course Material vs Past Question) will be automatically detected from filenames.</span>
                         </div>
                       )}
                     </div>
