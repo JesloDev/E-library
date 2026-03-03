@@ -1141,6 +1141,23 @@ export default function App() {
               </div>
             )}
             
+            {view === 'library' && (
+              <div className="flex lg:hidden items-center bg-slate-100 p-1 rounded-2xl border border-slate-200 ml-4 overflow-x-auto scrollbar-hide">
+                <button 
+                  onClick={() => setFilters({ ...filters, category: BookCategory.ACADEMIC })}
+                  className={`whitespace-nowrap px-4 py-1.5 rounded-xl text-xs font-bold transition-all ${filters.category === BookCategory.ACADEMIC ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500'}`}
+                >
+                  Academic
+                </button>
+                <button 
+                  onClick={() => setFilters({ ...filters, category: BookCategory.CHRISTIAN_NOVEL })}
+                  className={`whitespace-nowrap px-4 py-1.5 rounded-xl text-xs font-bold transition-all ${filters.category === BookCategory.CHRISTIAN_NOVEL ? 'bg-white text-emerald-700 shadow-sm' : 'text-slate-500'}`}
+                >
+                  Novels
+                </button>
+              </div>
+            )}
+            
             <div className="hidden md:flex items-center gap-4">
               {user?.isAdmin && (
                 <button 
@@ -1189,22 +1206,22 @@ export default function App() {
       {view === 'admin' ? (
         <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
           {/* Admin Tabs */}
-          <div className="flex gap-4 mb-8">
+          <div className="flex gap-2 sm:gap-4 mb-8 overflow-x-auto pb-2 scrollbar-hide -mx-4 px-4 sm:mx-0 sm:px-0">
             <button 
               onClick={() => setAdminTab('users')}
-              className={`px-6 py-3 rounded-2xl font-bold transition-all ${adminTab === 'users' ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-600/20' : 'bg-white text-slate-500 hover:bg-slate-50 border border-slate-200'}`}
+              className={`whitespace-nowrap px-4 sm:px-6 py-3 rounded-2xl font-bold transition-all text-sm sm:text-base ${adminTab === 'users' ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-600/20' : 'bg-white text-slate-500 hover:bg-slate-50 border border-slate-200'}`}
             >
               Member Management
             </button>
             <button 
               onClick={() => setAdminTab('books')}
-              className={`px-6 py-3 rounded-2xl font-bold transition-all ${adminTab === 'books' ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-600/20' : 'bg-white text-slate-500 hover:bg-slate-50 border border-slate-200'}`}
+              className={`whitespace-nowrap px-4 sm:px-6 py-3 rounded-2xl font-bold transition-all text-sm sm:text-base ${adminTab === 'books' ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-600/20' : 'bg-white text-slate-500 hover:bg-slate-50 border border-slate-200'}`}
             >
               Library Management
             </button>
             <button 
               onClick={() => setAdminTab('mass-upload')}
-              className={`px-6 py-3 rounded-2xl font-bold transition-all ${adminTab === 'mass-upload' ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-600/20' : 'bg-white text-slate-500 hover:bg-slate-50 border border-slate-200'}`}
+              className={`whitespace-nowrap px-4 sm:px-6 py-3 rounded-2xl font-bold transition-all text-sm sm:text-base ${adminTab === 'mass-upload' ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-600/20' : 'bg-white text-slate-500 hover:bg-slate-50 border border-slate-200'}`}
             >
               Mass Upload (GDrive)
             </button>
@@ -1239,16 +1256,16 @@ export default function App() {
                       />
                     </div>
                   </div>
-                  <div className="divide-y divide-slate-50">
+                  <div className="divide-y divide-slate-50 overflow-x-auto">
                     {filteredUsers.length > 0 ? filteredUsers.map(u => (
-                      <div key={u.id} className="p-6 flex items-center justify-between hover:bg-slate-50/50 transition-colors">
-                        <div className="flex items-center gap-4">
-                          <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold ${u.is_admin ? 'bg-blue-100 text-blue-600' : u.is_approved ? 'bg-emerald-100 text-emerald-600' : 'bg-rose-100 text-rose-600'}`}>
+                      <div key={u.id} className="p-4 sm:p-6 flex flex-col sm:flex-row sm:items-center justify-between hover:bg-slate-50/50 transition-colors gap-4">
+                        <div className="flex items-center gap-4 min-w-0">
+                          <div className={`w-10 h-10 rounded-full flex-shrink-0 flex items-center justify-center font-bold ${u.is_admin ? 'bg-blue-100 text-blue-600' : u.is_approved ? 'bg-emerald-100 text-emerald-600' : 'bg-rose-100 text-rose-600'}`}>
                             {u.name.charAt(0)}
                           </div>
-                          <div>
-                            <div className="flex items-center gap-2">
-                              <h4 className="font-bold text-slate-800">{u.name}</h4>
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <h4 className="font-bold text-slate-800 truncate">{u.name}</h4>
                               {u.is_admin && (
                                 <span className="px-1.5 py-0.5 bg-blue-50 text-blue-600 text-[10px] font-bold rounded uppercase">Admin</span>
                               )}
@@ -1259,14 +1276,14 @@ export default function App() {
                                 <span className="px-1.5 py-0.5 bg-slate-100 text-slate-500 text-[10px] font-bold rounded uppercase">You</span>
                               )}
                             </div>
-                            <p className="text-sm text-slate-400">{u.email}</p>
+                            <p className="text-sm text-slate-400 truncate">{u.email}</p>
                           </div>
                         </div>
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 sm:justify-end">
                           {u.id === user?.id ? (
                             <button 
                               onClick={demoteSelf}
-                              className="flex items-center gap-2 px-4 py-2 text-sm font-bold rounded-xl transition-all shadow-lg bg-amber-50 text-amber-600 hover:bg-amber-100 shadow-amber-600/5"
+                              className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 py-2 text-sm font-bold rounded-xl transition-all shadow-lg bg-amber-50 text-amber-600 hover:bg-amber-100 shadow-amber-600/5"
                             >
                               <ShieldAlert className="w-4 h-4" />
                               Demote Self
@@ -1275,14 +1292,14 @@ export default function App() {
                             <>
                               <button 
                                 onClick={() => promoteToAdmin(u.id, u.name)}
-                                className="flex items-center gap-2 px-4 py-2 text-sm font-bold rounded-xl transition-all shadow-lg bg-blue-600 text-white hover:bg-blue-700 shadow-blue-600/10"
+                                className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 py-2 text-sm font-bold rounded-xl transition-all shadow-lg bg-blue-600 text-white hover:bg-blue-700 shadow-blue-600/10"
                               >
                                 <ShieldCheck className="w-4 h-4" />
                                 Invite Admin
                               </button>
                               <button 
                                 onClick={() => toggleUserAccess(u.id, u.is_approved)}
-                                className={`flex items-center gap-2 px-4 py-2 text-sm font-bold rounded-xl transition-all shadow-lg ${
+                                className={`flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 py-2 text-sm font-bold rounded-xl transition-all shadow-lg ${
                                   u.is_approved 
                                     ? 'bg-rose-50 text-rose-600 hover:bg-rose-100 shadow-rose-600/5' 
                                     : 'bg-emerald-600 text-white hover:bg-emerald-700 shadow-emerald-600/10'
@@ -1291,12 +1308,12 @@ export default function App() {
                                 {u.is_approved ? (
                                   <>
                                     <EyeOff className="w-4 h-4" />
-                                    Revoke Access
+                                    Revoke
                                   </>
                                 ) : (
                                   <>
                                     <CheckCircle2 className="w-4 h-4" />
-                                    Restore Access
+                                    Restore
                                   </>
                                 )}
                               </button>
@@ -1387,22 +1404,8 @@ export default function App() {
                 </div>
                 
                 <form onSubmit={handleMassUpload} className="p-8 space-y-6">
-                  <div className="bg-amber-50 border border-amber-100 rounded-2xl p-4 mb-6">
-                    <div className="flex gap-3">
-                      <ShieldAlert className="w-5 h-5 text-amber-600 shrink-0" />
-                      <div className="text-xs text-amber-800 space-y-1">
-                        <p className="font-bold">Important Requirements:</p>
-                        <ul className="list-disc ml-4 space-y-1">
-                          <li>The Google Drive folder must be <strong>Public</strong> (Anyone with the link can view).</li>
-                          <li>Ensure <code>GOOGLE_DRIVE_API_KEY</code> is set in the environment variables.</li>
-                          <li>Files should be named as: <code>COURSE101 - Title of Material.pdf</code> for automatic categorization.</li>
-                        </ul>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                    <div className="md:col-span-2">
+                  <div className="grid grid-cols-1 gap-6">
+                    <div className="md:col-span-1">
                       <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 ml-1">Google Drive Folder ID</label>
                       <input 
                         name="folderId"
@@ -1415,7 +1418,7 @@ export default function App() {
                     </div>
 
                     {massUploadCategory === BookCategory.ACADEMIC && (
-                      <div className="md:col-span-2">
+                      <div className="md:col-span-1">
                         <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 ml-1">
                           Course Code (Optional)
                         </label>
@@ -1429,7 +1432,7 @@ export default function App() {
                     )}
 
                     {massUploadCategory === BookCategory.ACADEMIC && (
-                      <>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
                         <div>
                           <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 ml-1">Department</label>
                           <select 
@@ -1451,36 +1454,38 @@ export default function App() {
                             {LEVELS.map(level => <option key={level} value={level}>{level}</option>)}
                           </select>
                         </div>
-                      </>
-                    )}
-
-                    <div>
-                      <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 ml-1">Category</label>
-                      <select 
-                        name="category"
-                        required
-                        value={massUploadCategory}
-                        onChange={(e) => setMassUploadCategory(e.target.value as BookCategory)}
-                        className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
-                      >
-                        <option value={BookCategory.ACADEMIC}>Academic Materials</option>
-                        <option value={BookCategory.CHRISTIAN_NOVEL}>Christian Novels</option>
-                      </select>
-                    </div>
-
-                    {massUploadCategory === BookCategory.ACADEMIC && (
-                      <div>
-                        <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 ml-1">Material Type</label>
-                        <select 
-                          name="materialType"
-                          required
-                          className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
-                        >
-                          <option value="Course Material">Course Material</option>
-                          <option value="Past Question">Past Question</option>
-                        </select>
                       </div>
                     )}
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                      <div>
+                        <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 ml-1">Category</label>
+                        <select 
+                          name="category"
+                          required
+                          value={massUploadCategory}
+                          onChange={(e) => setMassUploadCategory(e.target.value as BookCategory)}
+                          className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
+                        >
+                          <option value={BookCategory.ACADEMIC}>Academic Materials</option>
+                          <option value={BookCategory.CHRISTIAN_NOVEL}>Christian Novels</option>
+                        </select>
+                      </div>
+
+                      {massUploadCategory === BookCategory.ACADEMIC && (
+                        <div>
+                          <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 ml-1">Material Type</label>
+                          <select 
+                            name="materialType"
+                            required
+                            className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
+                          >
+                            <option value="Course Material">Course Material</option>
+                            <option value="Past Question">Past Question</option>
+                          </select>
+                        </div>
+                      )}
+                    </div>
                   </div>
 
                   <button 
@@ -1635,19 +1640,19 @@ export default function App() {
                       {books.length} Items
                     </span>
                   </div>
-                  <div className="divide-y divide-slate-50">
+                  <div className="divide-y divide-slate-50 overflow-x-auto">
                     {books.map(book => (
-                      <div key={book.id} className="p-6 flex items-center justify-between hover:bg-slate-50/50 transition-colors">
-                        <div className="flex items-center gap-4">
-                          <img src={book.coverUrl || book.cover_url} className="w-12 h-16 object-cover rounded-lg shadow-sm" referrerPolicy="no-referrer" />
-                          <div>
-                            <h4 className="font-bold text-slate-800">{book.title}</h4>
-                            <p className="text-xs text-slate-400">{book.author} • {book.category}</p>
+                      <div key={book.id} className="p-4 sm:p-6 flex items-center justify-between hover:bg-slate-50/50 transition-colors gap-4">
+                        <div className="flex items-center gap-4 min-w-0">
+                          <img src={book.coverUrl || book.cover_url} className="w-10 h-14 sm:w-12 sm:h-16 object-cover rounded-lg shadow-sm flex-shrink-0" referrerPolicy="no-referrer" />
+                          <div className="min-w-0">
+                            <h4 className="font-bold text-slate-800 truncate">{book.title}</h4>
+                            <p className="text-xs text-slate-400 truncate">{book.author} • {book.category}</p>
                           </div>
                         </div>
                         <button 
                           onClick={() => deleteBook(book.id)}
-                          className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-xl transition-all"
+                          className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-xl transition-all flex-shrink-0"
                           title="Delete Material"
                         >
                           <X className="w-5 h-5" />
@@ -1864,13 +1869,16 @@ export default function App() {
                         return b.courseCode === selectedCourse && (b.materialType || 'Course Material') === selectedType;
                       })
                       .map((book) => (
-                    <motion.div
+                    <motion.a
                       layout
                       initial={{ opacity: 0, y: 20 }}
                       animate={{ opacity: 1, y: 0 }}
                       exit={{ opacity: 0, scale: 0.95 }}
                       key={book.id}
-                      className="group bg-white rounded-2xl border border-slate-200 overflow-hidden hover:shadow-xl hover:shadow-emerald-900/5 transition-all duration-300"
+                      href={book.downloadUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="group block bg-white rounded-2xl border border-slate-200 overflow-hidden hover:shadow-xl hover:shadow-emerald-900/5 transition-all duration-300"
                     >
                       <div className="relative aspect-[3/4] overflow-hidden bg-slate-100">
                         <img 
@@ -1880,15 +1888,10 @@ export default function App() {
                           referrerPolicy="no-referrer"
                         />
                         <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-end p-4">
-                          <a 
-                            href={book.downloadUrl} 
-                            target="_blank" 
-                            rel="noopener noreferrer"
-                            className="w-full bg-white text-emerald-700 py-2 rounded-xl font-semibold flex items-center justify-center gap-2 hover:bg-emerald-50 transition-colors"
-                          >
+                          <div className="w-full bg-white text-emerald-700 py-2 rounded-xl font-semibold flex items-center justify-center gap-2 hover:bg-emerald-50 transition-colors">
                             <Download className="w-4 h-4" />
                             Download PDF
-                          </a>
+                          </div>
                         </div>
                         <div className="absolute top-3 left-3 flex flex-wrap gap-2">
                           <span className={`px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider ${book.category === BookCategory.ACADEMIC ? 'bg-blue-500 text-white' : 'bg-amber-500 text-white'}`}>
@@ -1923,7 +1926,7 @@ export default function App() {
                           </div>
                         )}
                       </div>
-                    </motion.div>
+                    </motion.a>
                   ))}
                 </AnimatePresence>
               </div>
