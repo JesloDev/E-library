@@ -6,11 +6,16 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import multer from 'multer';
 import nodemailer from 'nodemailer';
+import { google } from 'googleapis';
+import axios from 'axios';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const upload = multer({ storage: multer.memoryStorage() });
+const upload = multer({ 
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 200 * 1024 * 1024 } // 200MB limit
+});
 
 // Email Transporter
 const getTransporter = () => {
@@ -499,6 +504,79 @@ async function startServer() {
     }
   });
 
+  // Helper to ensure bucket exists and has correct settings
+  async function ensureBucket(supabase: any) {
+    const bucketName = 'materials';
+    try {
+      const { data: buckets } = await supabase.storage.listBuckets();
+      const exists = buckets?.find((b: any) => b.name === bucketName);
+      
+      const bucketOptions = {
+        public: true,
+        fileSizeLimit: 209715200, // 200MB
+      };
+
+      if (!exists) {
+        console.log(`Bucket "${bucketName}" not found. Attempting to create...`);
+        const { error: createError } = await supabase.storage.createBucket(bucketName, bucketOptions);
+        if (createError) {
+          console.warn('Could not create bucket automatically:', createError.message);
+        }
+      } else {
+        // Update existing bucket to ensure it has the 200MB limit
+        const { error: updateError } = await supabase.storage.updateBucket(bucketName, bucketOptions);
+        if (updateError) {
+          console.warn('Could not update bucket settings:', updateError.message);
+        }
+      }
+    } catch (e) {
+      console.warn('Error checking/ensuring bucket:', e);
+    }
+  }
+
+  // Helper to insert book with fallback for missing columns
+  async function insertBookResilient(supabase: any, bookData: any) {
+    // Try full insert first
+    const { data, error } = await supabase
+      .from('books')
+      .insert([bookData])
+      .select()
+      .single();
+
+    if (!error) return { data, error: null };
+
+    // If error is about missing columns, try fallback
+    if (error.message?.includes('Could not find') || error.code === '42703') {
+      console.warn('[Supabase] Missing columns detected, falling back to description metadata');
+      
+      const safeColumns = ['id', 'title', 'author', 'category', 'cover_url', 'download_url', 'description', 'created_at'];
+      const fallbackData: any = {};
+      const metadata: any = {};
+
+      Object.keys(bookData).forEach(key => {
+        if (safeColumns.includes(key)) {
+          fallbackData[key] = bookData[key];
+        } else {
+          metadata[key] = bookData[key];
+        }
+      });
+
+      // Pack metadata into description
+      const metaString = `JSON_META:${JSON.stringify(metadata)}`;
+      fallbackData.description = fallbackData.description 
+        ? `${fallbackData.description}\n\n${metaString}`
+        : metaString;
+
+      return await supabase
+        .from('books')
+        .insert([fallbackData])
+        .select()
+        .single();
+    }
+
+    return { data: null, error };
+  }
+
   // Books Management
   app.get('/api/books', async (req, res) => {
     try {
@@ -518,12 +596,22 @@ async function startServer() {
   app.post('/api/admin/books', async (req, res) => {
     try {
       const supabase = getSupabase();
-      const bookData = { ...req.body, id: uuidv4() };
-      const { data, error } = await supabase
+      const { title, category, course_code } = req.body;
+
+      // Duplicate Check
+      const { data: existingBooks } = await supabase
         .from('books')
-        .insert([bookData])
-        .select()
-        .single();
+        .select('id')
+        .eq('title', title)
+        .eq('category', category)
+        .eq('course_code', course_code || '');
+
+      if (existingBooks && existingBooks.length > 0) {
+        return res.status(400).json({ error: 'A material with this title and course code already exists.' });
+      }
+
+      const bookData = { ...req.body, id: uuidv4() };
+      const { data, error } = await insertBookResilient(supabase, bookData);
       
       if (error) throw error;
       res.json(data);
@@ -560,32 +648,16 @@ async function startServer() {
 
   // File Upload to Supabase Storage
   app.post('/api/admin/upload', upload.single('file'), async (req: any, res) => {
+    console.log(`[Upload] Received upload request: ${req.file?.originalname} (${req.file?.size} bytes)`);
     try {
       if (!req.file) {
+        console.error('[Upload] No file in request');
         return res.status(400).json({ error: 'No file uploaded' });
       }
 
       const supabase = getSupabase();
+      await ensureBucket(supabase);
       const bucketName = 'materials';
-
-      // Ensure bucket exists (best effort)
-      try {
-        const { data: buckets } = await supabase.storage.listBuckets();
-        const exists = buckets?.find((b: any) => b.name === bucketName);
-        if (!exists) {
-          console.log(`Bucket "${bucketName}" not found. Attempting to create...`);
-          const { error: createError } = await supabase.storage.createBucket(bucketName, {
-            public: true,
-            fileSizeLimit: 52428800, // 50MB
-          });
-          if (createError) {
-            console.warn('Could not create bucket automatically:', createError.message);
-            console.warn('Please ensure you have created a public bucket named "materials" in your Supabase dashboard.');
-          }
-        }
-      } catch (e) {
-        console.warn('Error checking/creating bucket:', e);
-      }
 
       const fileName = `${uuidv4()}-${req.file.originalname}`;
       const { data, error } = await supabase.storage
@@ -609,6 +681,143 @@ async function startServer() {
       res.json({ url: publicUrl });
     } catch (err: any) {
       console.error('Upload error:', err);
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/admin/mass-upload-gdrive', async (req, res) => {
+    let { folderId, department, level, category, courseCode: manualCourseCode, materialType } = req.body;
+    const apiKey = process.env.GOOGLE_DRIVE_API_KEY;
+
+    console.log(`[Mass Upload] Starting request for folder: ${folderId}, Course: ${manualCourseCode}, Type: ${materialType}`);
+
+    if (!apiKey) {
+      console.error('[Mass Upload] GOOGLE_DRIVE_API_KEY missing');
+      return res.status(400).json({ error: 'GOOGLE_DRIVE_API_KEY is not configured in the environment.' });
+    }
+
+    if (!folderId) {
+      return res.status(400).json({ error: 'Folder ID is required.' });
+    }
+
+    // Extract ID from URL if user pasted a full link
+    if (folderId.includes('drive.google.com')) {
+      const match = folderId.match(/\/folders\/([a-zA-Z0-9_-]+)/);
+      if (match) {
+        folderId = match[1];
+        console.log(`[Mass Upload] Extracted folder ID from URL: ${folderId}`);
+      }
+    }
+
+    try {
+      const drive = google.drive({ version: 'v3', auth: apiKey });
+      
+      console.log('[Mass Upload] Fetching file list from GDrive...');
+      // List files in the folder
+      const response = await drive.files.list({
+        q: `'${folderId}' in parents and mimeType = 'application/pdf' and trashed = false`,
+        fields: 'files(id, name, size, mimeType)',
+      }).catch(err => {
+        console.error('[Mass Upload] GDrive API List Error:', err.message);
+        if (err.message.includes('File not found')) {
+          throw new Error('Google Drive Folder not found. Please check the ID and ensure the folder is shared as "Public".');
+        }
+        throw err;
+      });
+
+      const files = response.data.files || [];
+      console.log(`[Mass Upload] Found ${files.length} PDF files`);
+
+      if (files.length === 0) {
+        return res.json({ success: true, message: 'No PDF files found in the specified folder.', count: 0 });
+      }
+
+      const supabase = getSupabase();
+      await ensureBucket(supabase);
+      const bucketName = 'materials';
+      const results = [];
+
+      for (const file of files) {
+        try {
+          // Download from GDrive
+          const fileResponse = await drive.files.get(
+            { fileId: file.id!, alt: 'media' },
+            { responseType: 'arraybuffer' }
+          );
+
+          const sanitizedOriginalName = file.name?.replace(/[^a-zA-Z0-9.-]/g, '_');
+          const fileName = `${uuidv4()}-${sanitizedOriginalName}`;
+          const buffer = Buffer.from(fileResponse.data as ArrayBuffer);
+
+          // Upload to Supabase
+          const { error: uploadError } = await supabase.storage
+            .from(bucketName)
+            .upload(fileName, buffer, {
+              contentType: 'application/pdf',
+              upsert: true
+            });
+
+          if (uploadError) throw uploadError;
+
+          const { data: { publicUrl } } = supabase.storage
+            .from(bucketName)
+            .getPublicUrl(fileName);
+
+          // Create book record
+          // Try to extract course code from file name if not manually provided
+          const nameParts = file.name?.split(' - ') || [];
+          let courseCode = manualCourseCode || (nameParts.length > 1 ? nameParts[0].trim().toUpperCase() : 'GENERAL');
+          let title = nameParts.length > 1 ? nameParts[1].replace('.pdf', '').trim() : file.name?.replace('.pdf', '').trim();
+
+          // If it's a Christian Novel, use filename as title and clear courseCode
+          if (category === 'Christian Novel') {
+            title = file.name?.replace('.pdf', '').trim();
+            courseCode = ''; // Novels don't have course codes
+          }
+
+          // Duplicate Check
+          const { data: existingBooks } = await supabase
+            .from('books')
+            .select('id')
+            .eq('title', title)
+            .eq('category', category)
+            .eq('course_code', courseCode || '');
+
+          if (existingBooks && existingBooks.length > 0) {
+            console.log(`[Mass Upload] Skipping duplicate: ${title} (${courseCode})`);
+            results.push({ name: file.name, status: 'skipped', message: 'Duplicate found' });
+            continue;
+          }
+
+          const bookData = {
+            id: uuidv4(),
+            title,
+            author: 'DLCF Library',
+            category,
+            department,
+            level,
+            course_code: courseCode,
+            course_title: title,
+            material_type: materialType || 'Course Material',
+            download_url: publicUrl,
+            cover_url: 'https://picsum.photos/seed/book/400/600', // Default cover for mass upload
+            description: `Mass uploaded from Google Drive: ${file.name}`
+          };
+
+          const { data: dbData, error: dbError } = await insertBookResilient(supabase, bookData);
+
+          if (dbError) throw dbError;
+
+          results.push({ name: file.name, status: 'success' });
+        } catch (err: any) {
+          console.error(`Failed to process file ${file.name}:`, err.message);
+          results.push({ name: file.name, status: 'failed', error: err.message });
+        }
+      }
+
+      res.json({ success: true, results, count: results.filter(r => r.status === 'success').length });
+    } catch (err: any) {
+      console.error('Mass upload error:', err);
       res.status(500).json({ error: err.message });
     }
   });

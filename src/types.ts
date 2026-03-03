@@ -31,6 +31,7 @@ export interface Book {
   courseCode?: string;
   courseTitle?: string;
   level?: string;
+  materialType?: 'Course Material' | 'Past Question';
 }
 
 export interface FilterState {

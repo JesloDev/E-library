@@ -53,6 +53,8 @@ export default function App() {
   });
   const [isSidebarOpen, setIsSidebarOpen] = useState(false);
   const [isNavOpen, setIsNavOpen] = useState(false);
+  const [selectedCourse, setSelectedCourse] = useState<string | null>(null);
+  const [selectedType, setSelectedType] = useState<'Course Material' | 'Past Question' | null>(null);
   const [dbError, setDbError] = useState<string | null>(null);
   const [revokedModal, setRevokedModal] = useState<{ message: string } | null>(null);
   const [confirmModal, setConfirmModal] = useState<{ 
@@ -67,17 +69,43 @@ export default function App() {
   const [allUsers, setAllUsers] = useState<any[]>([]);
   const [userSearch, setUserSearch] = useState('');
   const [adminLinks, setAdminLinks] = useState<RegistrationLink[]>([]);
-  const [adminTab, setAdminTab] = useState<'users' | 'books'>('users');
+  const [adminTab, setAdminTab] = useState<'users' | 'books' | 'mass-upload'>('users');
   const [formCategory, setFormCategory] = useState<BookCategory>(BookCategory.ACADEMIC);
+  const [massUploadCategory, setMassUploadCategory] = useState<BookCategory>(BookCategory.ACADEMIC);
   const [loading, setLoading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<string | null>(null);
   const [showPassword, setShowPassword] = useState(false);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
+  useEffect(() => {
+    setSelectedCourse(null);
+    setSelectedType(null);
+  }, [filters.category]);
+
   const showToast = (message: string, type: 'success' | 'error' = 'success') => {
     setToast({ message, type });
     setTimeout(() => setToast(null), 3000);
   };
+
+  const Toast = () => (
+    <AnimatePresence>
+      {toast && (
+        <motion.div
+          initial={{ opacity: 0, y: 50, scale: 0.9 }}
+          animate={{ opacity: 1, y: 0, scale: 1 }}
+          exit={{ opacity: 0, y: 20, scale: 0.9 }}
+          className={`fixed bottom-8 right-8 z-[110] px-6 py-4 rounded-2xl shadow-2xl flex items-center gap-4 border ${
+            toast.type === 'success' ? 'bg-emerald-600 border-emerald-500 text-white' : 'bg-rose-600 border-rose-500 text-white'
+          }`}
+        >
+          <div className="p-2 rounded-xl bg-white/20">
+            {toast.type === 'success' ? <CheckCircle2 size={20} /> : <X size={20} />}
+          </div>
+          <span className="font-bold tracking-tight">{toast.message}</span>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
 
   const fetchBooks = async () => {
     try {
@@ -99,13 +127,32 @@ export default function App() {
         return;
       }
 
-      const normalized = data.map((b: any) => ({
-        ...b,
-        coverUrl: b.cover_url || b.coverUrl,
-        downloadUrl: b.download_url || b.downloadUrl,
-        courseCode: b.course_code || b.courseCode,
-        courseTitle: b.course_title || b.courseTitle
-      }));
+      const normalized = data.map((b: any) => {
+        let metadata: any = {};
+        let cleanDescription = b.description || '';
+        
+        if (cleanDescription.includes('JSON_META:')) {
+          const parts = cleanDescription.split('JSON_META:');
+          cleanDescription = parts[0].trim();
+          try {
+            metadata = JSON.parse(parts[1]);
+          } catch (e) {
+            console.error('Failed to parse metadata from description', e);
+          }
+        }
+
+        return {
+          ...b,
+          description: cleanDescription,
+          coverUrl: b.cover_url || b.coverUrl || metadata.cover_url,
+          downloadUrl: b.download_url || b.downloadUrl || metadata.download_url,
+          courseCode: b.course_code || b.courseCode || metadata.course_code || metadata.courseCode,
+          courseTitle: b.course_title || b.courseTitle || metadata.course_title || metadata.courseTitle,
+          materialType: b.material_type || b.materialType || metadata.material_type || metadata.materialType,
+          department: b.department || metadata.department,
+          level: b.level || metadata.level
+        };
+      });
       
       // Only show INITIAL_BOOKS if we are sure the DB is not just empty
       setBooks(normalized.length > 0 ? normalized : []);
@@ -561,7 +608,8 @@ export default function App() {
         department: formData.get('department'),
         level: formData.get('level'),
         course_code: formData.get('course_code'),
-        course_title: formData.get('course_title')
+        course_title: formData.get('course_title'),
+        material_type: formData.get('material_type') || 'Course Material'
       };
 
       const res = await fetch('/api/admin/books', {
@@ -656,6 +704,39 @@ export default function App() {
     }
   };
 
+  const handleMassUpload = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const formData = new FormData(e.currentTarget);
+    const folderId = formData.get('folderId');
+    const department = formData.get('department');
+    const level = formData.get('level');
+    const category = formData.get('category');
+    const courseCode = formData.get('courseCode');
+    const materialType = formData.get('materialType');
+
+    setLoading(true);
+    setUploadProgress('Starting mass upload...');
+    try {
+      const res = await fetch('/api/admin/mass-upload-gdrive', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ folderId, department, level, category, courseCode, materialType }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        showToast(`Successfully uploaded ${data.count} files!`);
+        fetchBooks();
+      } else {
+        showToast(data.error || 'Mass upload failed', 'error');
+      }
+    } catch (err) {
+      showToast('Connection error', 'error');
+    } finally {
+      setLoading(false);
+      setUploadProgress(null);
+    }
+  };
+
   const filteredBooks = useMemo(() => {
     return books.filter((book) => {
       const matchesSearch = 
@@ -664,7 +745,7 @@ export default function App() {
         book.courseCode?.toLowerCase().includes(filters.search.toLowerCase()) ||
         book.courseTitle?.toLowerCase().includes(filters.search.toLowerCase());
       
-      const matchesCategory = book.category === filters.category;
+      const matchesCategory = filters.category === 'All' || book.category === filters.category;
       
       const matchesDept = 
         filters.department === 'All' || 
@@ -677,6 +758,50 @@ export default function App() {
       return matchesSearch && matchesCategory && matchesDept && matchesLevel;
     });
   }, [books, filters]);
+
+  const groupedCourses = useMemo(() => {
+    if (filters.category !== BookCategory.ACADEMIC) return [];
+    
+    const groups: Record<string, { code: string, title: string, count: number, department: string, level: string, coverUrl: string }> = {};
+    
+    filteredBooks.forEach(book => {
+      if (book.category === BookCategory.ACADEMIC && book.courseCode) {
+        if (!groups[book.courseCode]) {
+          groups[book.courseCode] = {
+            code: book.courseCode,
+            title: book.courseTitle || book.title,
+            count: 0,
+            department: book.department || '',
+            level: book.level || '',
+            coverUrl: book.coverUrl
+          };
+        }
+        groups[book.courseCode].count++;
+      }
+    });
+    
+    return Object.values(groups);
+  }, [filteredBooks, filters.category]);
+
+  const groupedTypes = useMemo(() => {
+    if (!selectedCourse) return [];
+    
+    const types: Record<string, { name: string, count: number }> = {
+      'Course Material': { name: 'Course Material', count: 0 },
+      'Past Question': { name: 'Past Question', count: 0 }
+    };
+    
+    filteredBooks
+      .filter(b => b.courseCode === selectedCourse)
+      .forEach(book => {
+        const type = book.materialType || 'Course Material';
+        if (types[type]) {
+          types[type].count++;
+        }
+      });
+    
+    return Object.values(types).filter(t => t.count > 0);
+  }, [filteredBooks, selectedCourse]);
 
   const filteredUsers = useMemo(() => {
     if (!userSearch) return allUsers;
@@ -691,6 +816,7 @@ export default function App() {
   if (view === 'login') {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+        <Toast />
         <motion.div 
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -768,6 +894,7 @@ export default function App() {
   if (view === 'register') {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+        <Toast />
         <motion.div 
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -844,6 +971,7 @@ export default function App() {
   if (view === 'forgot-password') {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+        <Toast />
         <motion.div 
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -891,6 +1019,7 @@ export default function App() {
   if (view === 'profile') {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
+        <Toast />
         <motion.div 
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
@@ -966,26 +1095,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-[#f8f9fa] text-slate-900 font-sans">
-      {/* Toast Notification */}
-      <AnimatePresence>
-        {toast && (
-          <motion.div
-            initial={{ opacity: 0, y: 50, scale: 0.9 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 20, scale: 0.9 }}
-            className={`fixed bottom-8 right-8 z-[110] px-6 py-4 rounded-2xl shadow-2xl flex items-center gap-4 border ${
-              toast.type === 'success' 
-                ? 'bg-emerald-600 border-emerald-500 text-white' 
-                : 'bg-rose-600 border-rose-500 text-white'
-            }`}
-          >
-            <div className={`p-2 rounded-xl ${toast.type === 'success' ? 'bg-white/20' : 'bg-white/20'}`}>
-              {toast.type === 'success' ? <CheckCircle2 size={20} /> : <X size={20} />}
-            </div>
-            <span className="font-bold tracking-tight">{toast.message}</span>
-          </motion.div>
-        )}
-      </AnimatePresence>
+      <Toast />
 
       {/* Navigation */}
       <nav className="sticky top-0 z-40 bg-white/80 backdrop-blur-md border-b border-slate-200">
@@ -1091,6 +1201,12 @@ export default function App() {
               className={`px-6 py-3 rounded-2xl font-bold transition-all ${adminTab === 'books' ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-600/20' : 'bg-white text-slate-500 hover:bg-slate-50 border border-slate-200'}`}
             >
               Library Management
+            </button>
+            <button 
+              onClick={() => setAdminTab('mass-upload')}
+              className={`px-6 py-3 rounded-2xl font-bold transition-all ${adminTab === 'mass-upload' ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-600/20' : 'bg-white text-slate-500 hover:bg-slate-50 border border-slate-200'}`}
+            >
+              Mass Upload (GDrive)
             </button>
           </div>
 
@@ -1255,6 +1371,138 @@ export default function App() {
                 </div>
               </div>
             </div>
+          ) : adminTab === 'mass-upload' ? (
+            <div className="max-w-2xl mx-auto">
+              <div className="bg-white rounded-3xl border border-slate-200 overflow-hidden">
+                <div className="p-8 border-b border-slate-100">
+                  <div className="flex items-center gap-4 mb-2">
+                    <div className="bg-emerald-100 p-3 rounded-2xl">
+                      <FileUp className="w-6 h-6 text-emerald-600" />
+                    </div>
+                    <div>
+                      <h2 className="text-xl font-bold text-slate-800">Google Drive Mass Upload</h2>
+                      <p className="text-sm text-slate-500">Automatically import multiple PDFs from a Google Drive folder</p>
+                    </div>
+                  </div>
+                </div>
+                
+                <form onSubmit={handleMassUpload} className="p-8 space-y-6">
+                  <div className="bg-amber-50 border border-amber-100 rounded-2xl p-4 mb-6">
+                    <div className="flex gap-3">
+                      <ShieldAlert className="w-5 h-5 text-amber-600 shrink-0" />
+                      <div className="text-xs text-amber-800 space-y-1">
+                        <p className="font-bold">Important Requirements:</p>
+                        <ul className="list-disc ml-4 space-y-1">
+                          <li>The Google Drive folder must be <strong>Public</strong> (Anyone with the link can view).</li>
+                          <li>Ensure <code>GOOGLE_DRIVE_API_KEY</code> is set in the environment variables.</li>
+                          <li>Files should be named as: <code>COURSE101 - Title of Material.pdf</code> for automatic categorization.</li>
+                        </ul>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <div className="md:col-span-2">
+                      <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 ml-1">Google Drive Folder ID</label>
+                      <input 
+                        name="folderId"
+                        type="text" 
+                        required
+                        placeholder="e.g. 1aBcDeFgHiJkLmNoPqRsTuVwXyZ"
+                        className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
+                      />
+                      <p className="mt-1.5 text-[10px] text-slate-400 ml-1">The ID is the long string at the end of the folder URL.</p>
+                    </div>
+
+                    {massUploadCategory === BookCategory.ACADEMIC && (
+                      <div className="md:col-span-2">
+                        <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 ml-1">
+                          Course Code (Optional)
+                        </label>
+                        <input 
+                          name="courseCode"
+                          type="text" 
+                          placeholder="e.g. CSC 101 (Leave blank to extract from filename)"
+                          className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
+                        />
+                      </div>
+                    )}
+
+                    {massUploadCategory === BookCategory.ACADEMIC && (
+                      <>
+                        <div>
+                          <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 ml-1">Department</label>
+                          <select 
+                            name="department"
+                            required
+                            className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
+                          >
+                            {DEPARTMENTS.map(dept => <option key={dept} value={dept}>{dept}</option>)}
+                          </select>
+                        </div>
+
+                        <div>
+                          <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 ml-1">Level</label>
+                          <select 
+                            name="level"
+                            required
+                            className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
+                          >
+                            {LEVELS.map(level => <option key={level} value={level}>{level}</option>)}
+                          </select>
+                        </div>
+                      </>
+                    )}
+
+                    <div>
+                      <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 ml-1">Category</label>
+                      <select 
+                        name="category"
+                        required
+                        value={massUploadCategory}
+                        onChange={(e) => setMassUploadCategory(e.target.value as BookCategory)}
+                        className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
+                      >
+                        <option value={BookCategory.ACADEMIC}>Academic Materials</option>
+                        <option value={BookCategory.CHRISTIAN_NOVEL}>Christian Novels</option>
+                      </select>
+                    </div>
+
+                    {massUploadCategory === BookCategory.ACADEMIC && (
+                      <div>
+                        <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 ml-1">Material Type</label>
+                        <select 
+                          name="materialType"
+                          required
+                          className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
+                        >
+                          <option value="Course Material">Course Material</option>
+                          <option value="Past Question">Past Question</option>
+                        </select>
+                      </div>
+                    )}
+                  </div>
+
+                  <button 
+                    type="submit"
+                    disabled={loading}
+                    className="w-full bg-emerald-600 text-white py-4 rounded-2xl font-bold shadow-lg shadow-emerald-600/20 hover:bg-emerald-700 transition-all active:scale-[0.98] disabled:opacity-50 flex items-center justify-center gap-2"
+                  >
+                    {loading ? (
+                      <>
+                        <Loader2 className="w-5 h-5 animate-spin" />
+                        {uploadProgress || 'Processing...'}
+                      </>
+                    ) : (
+                      <>
+                        <FileUp className="w-5 h-5" />
+                        Start Mass Import
+                      </>
+                    )}
+                  </button>
+                </form>
+              </div>
+            </div>
           ) : (
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
               {/* Add Book Form */}
@@ -1344,6 +1592,13 @@ export default function App() {
                             <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1.5 ml-1">Course Title</label>
                             <input name="course_title" required className="w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none" placeholder="Intro to CS" />
                           </div>
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1.5 ml-1">Material Type</label>
+                          <select name="material_type" required className="w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none">
+                            <option value="Course Material">Course Material</option>
+                            <option value="Past Question">Past Question</option>
+                          </select>
                         </div>
                       </div>
                     )}
@@ -1471,88 +1726,227 @@ export default function App() {
             {/* Book Grid */}
             <div className="flex-1">
               <div className="flex items-center justify-between mb-6">
-                <h2 className="text-2xl font-bold text-slate-800">
-                  {filters.category === 'All' ? 'All Resources' : filters.category}
-                  <span className="ml-2 text-sm font-normal text-slate-400">({filteredBooks.length} books)</span>
-                </h2>
+                <div className="flex items-center gap-4">
+                  {(selectedCourse || selectedType) && (
+                    <button 
+                      onClick={() => {
+                        if (selectedType) setSelectedType(null);
+                        else setSelectedCourse(null);
+                      }}
+                      className="p-2 hover:bg-slate-100 rounded-xl transition-colors text-slate-500"
+                    >
+                      <X className="w-5 h-5" />
+                    </button>
+                  )}
+                  <h2 className="text-2xl font-bold text-slate-800">
+                    {selectedCourse ? (
+                      <div className="flex items-center gap-2">
+                        <span 
+                          className="text-emerald-600 cursor-pointer hover:underline"
+                          onClick={() => {
+                            setSelectedCourse(null);
+                            setSelectedType(null);
+                          }}
+                        >
+                          {selectedCourse}
+                        </span>
+                        {selectedType && (
+                          <>
+                            <ChevronRight className="w-4 h-4 text-slate-300" />
+                            <span className="text-slate-800">{selectedType}s</span>
+                          </>
+                        )}
+                        {!selectedType && <span className="text-slate-400 font-normal ml-2">Directory</span>}
+                      </div>
+                    ) : (
+                      filters.category === 'All' ? 'All Resources' : filters.category
+                    )}
+                    <span className="ml-2 text-sm font-normal text-slate-400">
+                      ({selectedType ? filteredBooks.filter(b => b.courseCode === selectedCourse && (b.materialType || 'Course Material') === selectedType).length : 
+                        (selectedCourse ? groupedTypes.length : 
+                          (filters.category === BookCategory.ACADEMIC ? groupedCourses.length : filteredBooks.length))} 
+                      {selectedType || filters.category !== BookCategory.ACADEMIC ? ' items' : (selectedCourse ? ' categories' : ' courses')})
+                    </span>
+                  </h2>
+                </div>
               </div>
 
-              {filteredBooks.length > 0 ? (
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
-                  <AnimatePresence mode="popLayout">
-                    {filteredBooks.map((book) => (
-                      <motion.div
-                        layout
-                        initial={{ opacity: 0, y: 20 }}
-                        animate={{ opacity: 1, y: 0 }}
-                        exit={{ opacity: 0, scale: 0.95 }}
-                        key={book.id}
-                        className="group bg-white rounded-2xl border border-slate-200 overflow-hidden hover:shadow-xl hover:shadow-emerald-900/5 transition-all duration-300"
-                      >
-                        <div className="relative aspect-[3/4] overflow-hidden bg-slate-100">
-                          <img 
-                            src={book.coverUrl} 
-                            alt={book.title}
-                            className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
-                            referrerPolicy="no-referrer"
-                          />
-                          <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-end p-4">
-                            <a 
-                              href={book.downloadUrl} 
-                              target="_blank" 
-                              rel="noopener noreferrer"
-                              className="w-full bg-white text-emerald-700 py-2 rounded-xl font-semibold flex items-center justify-center gap-2 hover:bg-emerald-50 transition-colors"
-                            >
-                              <Download className="w-4 h-4" />
-                              Download PDF
-                            </a>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+                <AnimatePresence mode="popLayout">
+                  {/* Level 1: Academic Category - Grouped Courses View */}
+                  {filters.category === BookCategory.ACADEMIC && !selectedCourse && groupedCourses.map((course) => (
+                    <motion.div
+                      layout
+                      initial={{ opacity: 0, y: 20 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, scale: 0.95 }}
+                      key={course.code}
+                      onClick={() => setSelectedCourse(course.code)}
+                      className="group cursor-pointer bg-white rounded-2xl border border-slate-200 overflow-hidden hover:shadow-xl hover:shadow-emerald-900/5 transition-all duration-300"
+                    >
+                      <div className="relative aspect-[3/4] overflow-hidden bg-slate-100">
+                        <img 
+                          src={course.coverUrl} 
+                          alt={course.title}
+                          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                          referrerPolicy="no-referrer"
+                        />
+                        <div className="absolute inset-0 bg-emerald-900/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                          <div className="bg-white text-emerald-700 px-4 py-2 rounded-xl font-bold flex items-center gap-2">
+                            <Library className="w-4 h-4" />
+                            Open Course
                           </div>
-                          <div className="absolute top-3 left-3 flex flex-wrap gap-2">
-                            <span className={`px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider ${book.category === BookCategory.ACADEMIC ? 'bg-blue-500 text-white' : 'bg-amber-500 text-white'}`}>
-                              {book.category === BookCategory.ACADEMIC ? 'Academic' : 'Novel'}
+                        </div>
+                        <div className="absolute top-3 left-3 flex flex-wrap gap-2">
+                          <span className="px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider bg-emerald-600 text-white">
+                            {course.count} {course.count === 1 ? 'Material' : 'Materials'}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="p-4">
+                        <div className="mb-1">
+                          <span className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest">{course.code}</span>
+                        </div>
+                        <h3 className="font-bold text-slate-800 line-clamp-1 group-hover:text-emerald-600 transition-colors">{course.title}</h3>
+                        <div className="flex items-center gap-2 text-[11px] text-slate-400 border-t border-slate-100 pt-3 mt-3">
+                          <GraduationCap className="w-3 h-3" />
+                          <span className="truncate">{course.department} • {course.level}</span>
+                        </div>
+                      </div>
+                    </motion.div>
+                  ))}
+
+                  {/* Level 2: Selected Course - Grouped Types View */}
+                  {selectedCourse && !selectedType && groupedTypes.map((type) => (
+                    <motion.div
+                      layout
+                      initial={{ opacity: 0, y: 20 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, scale: 0.95 }}
+                      key={type.name}
+                      onClick={() => setSelectedType(type.name as any)}
+                      className="group cursor-pointer bg-white rounded-2xl border border-slate-200 overflow-hidden hover:shadow-xl hover:shadow-emerald-900/5 transition-all duration-300"
+                    >
+                      <div className="relative aspect-[3/4] overflow-hidden bg-slate-50 flex items-center justify-center">
+                        <div className="bg-emerald-100 p-8 rounded-full group-hover:scale-110 transition-transform duration-500">
+                          {type.name === 'Past Question' ? (
+                            <Clock className="w-16 h-16 text-emerald-600" />
+                          ) : (
+                            <BookOpen className="w-16 h-16 text-emerald-600" />
+                          )}
+                        </div>
+                        <div className="absolute inset-0 bg-emerald-900/10 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+                          <div className="bg-white text-emerald-700 px-4 py-2 rounded-xl font-bold flex items-center gap-2">
+                            <Plus className="w-4 h-4" />
+                            View Files
+                          </div>
+                        </div>
+                        <div className="absolute top-3 left-3 flex flex-wrap gap-2">
+                          <span className="px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider bg-emerald-600 text-white">
+                            {type.count} {type.count === 1 ? 'File' : 'Files'}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="p-6 text-center">
+                        <h3 className="text-lg font-bold text-slate-800 group-hover:text-emerald-600 transition-colors">
+                          {type.name}s
+                        </h3>
+                        <p className="text-sm text-slate-400 mt-1">Directory for {selectedCourse}</p>
+                      </div>
+                    </motion.div>
+                  ))}
+
+                  {/* Level 3: Individual Items View (Novels or Selected Type) */}
+                  {(filters.category !== BookCategory.ACADEMIC || selectedType) && 
+                    filteredBooks
+                      .filter(b => {
+                        if (filters.category === BookCategory.CHRISTIAN_NOVEL) return true;
+                        return b.courseCode === selectedCourse && (b.materialType || 'Course Material') === selectedType;
+                      })
+                      .map((book) => (
+                    <motion.div
+                      layout
+                      initial={{ opacity: 0, y: 20 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, scale: 0.95 }}
+                      key={book.id}
+                      className="group bg-white rounded-2xl border border-slate-200 overflow-hidden hover:shadow-xl hover:shadow-emerald-900/5 transition-all duration-300"
+                    >
+                      <div className="relative aspect-[3/4] overflow-hidden bg-slate-100">
+                        <img 
+                          src={book.coverUrl} 
+                          alt={book.title}
+                          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-500"
+                          referrerPolicy="no-referrer"
+                        />
+                        <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex flex-col justify-end p-4">
+                          <a 
+                            href={book.downloadUrl} 
+                            target="_blank" 
+                            rel="noopener noreferrer"
+                            className="w-full bg-white text-emerald-700 py-2 rounded-xl font-semibold flex items-center justify-center gap-2 hover:bg-emerald-50 transition-colors"
+                          >
+                            <Download className="w-4 h-4" />
+                            Download PDF
+                          </a>
+                        </div>
+                        <div className="absolute top-3 left-3 flex flex-wrap gap-2">
+                          <span className={`px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider ${book.category === BookCategory.ACADEMIC ? 'bg-blue-500 text-white' : 'bg-amber-500 text-white'}`}>
+                            {book.category === BookCategory.ACADEMIC ? 'Academic' : 'Novel'}
+                          </span>
+                          {book.level && (
+                            <span className="px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider bg-white/90 backdrop-blur text-slate-700">
+                              {book.level}
                             </span>
-                            {book.level && (
-                              <span className="px-2 py-1 rounded-md text-[10px] font-bold uppercase tracking-wider bg-white/90 backdrop-blur text-slate-700">
-                                {book.level}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                        <div className="p-4">
-                          <div className="mb-1">
-                            {book.courseCode && (
-                              <span className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest">{book.courseCode}</span>
-                            )}
-                          </div>
-                          <h3 className="font-bold text-slate-800 line-clamp-1 group-hover:text-emerald-600 transition-colors">{book.title}</h3>
-                          <p className="text-sm text-slate-500 mb-3">{book.author}</p>
-                          
-                          {book.category === BookCategory.ACADEMIC && (
-                            <div className="flex items-center gap-2 text-[11px] text-slate-400 border-t border-slate-100 pt-3">
-                              <GraduationCap className="w-3 h-3" />
-                              <span className="truncate">{book.department}</span>
-                            </div>
-                          )}
-                          {book.category === BookCategory.CHRISTIAN_NOVEL && (
-                            <div className="flex items-center gap-2 text-[11px] text-slate-400 border-t border-slate-100 pt-3">
-                              <BookOpen className="w-3 h-3" />
-                              <span>Christian Literature</span>
-                            </div>
                           )}
                         </div>
-                      </motion.div>
-                    ))}
-                  </AnimatePresence>
-                </div>
-              ) : (
+                      </div>
+                      <div className="p-4">
+                        <div className="mb-1">
+                          {book.courseCode && (
+                            <span className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest">{book.courseCode}</span>
+                          )}
+                        </div>
+                        <h3 className="font-bold text-slate-800 line-clamp-1 group-hover:text-emerald-600 transition-colors">{book.title}</h3>
+                        <p className="text-sm text-slate-500 mb-3">{book.author}</p>
+                        
+                        {book.category === BookCategory.ACADEMIC && (
+                          <div className="flex items-center gap-2 text-[11px] text-slate-400 border-t border-slate-100 pt-3">
+                            <GraduationCap className="w-3 h-3" />
+                            <span className="truncate">{book.department}</span>
+                          </div>
+                        )}
+                        {book.category === BookCategory.CHRISTIAN_NOVEL && (
+                          <div className="flex items-center gap-2 text-[11px] text-slate-400 border-t border-slate-100 pt-3">
+                            <BookOpen className="w-3 h-3" />
+                            <span>Christian Literature</span>
+                          </div>
+                        )}
+                      </div>
+                    </motion.div>
+                  ))}
+                </AnimatePresence>
+              </div>
+
+              {((filters.category === BookCategory.ACADEMIC && !selectedCourse && groupedCourses.length === 0) || 
+                (selectedCourse && !selectedType && groupedTypes.length === 0) ||
+                ((filters.category !== BookCategory.ACADEMIC || selectedType) && 
+                  filteredBooks.filter(b => {
+                    if (filters.category === BookCategory.CHRISTIAN_NOVEL) return true;
+                    return b.courseCode === selectedCourse && (b.materialType || 'Course Material') === selectedType;
+                  }).length === 0)) && (
                 <div className="flex flex-col items-center justify-center py-20 bg-white rounded-3xl border border-dashed border-slate-200">
                   <div className="bg-slate-50 p-4 rounded-full mb-4">
                     <BookIcon className="w-8 h-8 text-slate-300" />
                   </div>
-                  <h3 className="text-lg font-semibold text-slate-800">No books found</h3>
+                  <h3 className="text-lg font-semibold text-slate-800">No materials found</h3>
                   <p className="text-slate-500 text-sm">Try adjusting your filters or search terms.</p>
                   <button 
-                    onClick={() => setFilters({ search: '', category: 'All', department: 'All', level: 'All' })}
+                    onClick={() => {
+                      setFilters({ search: '', category: 'All', department: 'All', level: 'All' });
+                      setSelectedCourse(null);
+                      setSelectedType(null);
+                    }}
                     className="mt-4 text-emerald-600 font-medium hover:underline text-sm"
                   >
                     Clear all filters
