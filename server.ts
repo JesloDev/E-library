@@ -133,8 +133,7 @@ function getSupabase() {
     const url = process.env.SUPABASE_URL;
     const key = process.env.SUPABASE_ANON_KEY;
     if (!url || !key) {
-      // During development in AI Studio, these might be missing until configured.
-      // We'll throw a descriptive error when an API is actually called.
+      console.error('[Supabase] CRITICAL: SUPABASE_URL or SUPABASE_ANON_KEY is missing.');
       throw new Error('SUPABASE_URL and SUPABASE_ANON_KEY are required. Please configure them in your environment variables.');
     }
     supabaseClient = createClient(url, key);
@@ -191,7 +190,13 @@ async function startServer() {
       // Send login notification (async)
       sendLoginNotification(user.email, user.name);
 
-      res.json({ user: { id: user.id, email: user.email, name: user.name, isAdmin: !!user.is_admin } });
+      res.json({ user: { 
+        id: user.id, 
+        email: user.email, 
+        name: user.name, 
+        isAdmin: !!user.is_admin,
+        isSuperAdmin: !!user.is_super_admin
+      } });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -322,7 +327,41 @@ async function startServer() {
         .single();
       
       if (error) throw error;
-      res.json({ user: { id: data.id, email: data.email, name: data.name, isAdmin: !!data.is_admin } });
+      res.json({ user: { 
+        id: data.id, 
+        email: data.email, 
+        name: data.name, 
+        isAdmin: !!data.is_admin,
+        isSuperAdmin: !!data.is_super_admin
+      } });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.get('/api/auth/me', async (req, res) => {
+    const userId = req.query.userId as string;
+    if (!userId) return res.status(400).json({ error: 'User ID required' });
+
+    try {
+      const supabase = getSupabase();
+      const { data: user, error } = await supabase
+        .from('users')
+        .select('*')
+        .eq('id', userId)
+        .single();
+
+      if (error || !user) return res.status(404).json({ error: 'User not found' });
+
+      res.json({
+        user: {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          isAdmin: !!user.is_admin,
+          isSuperAdmin: !!user.is_super_admin
+        }
+      });
     } catch (err: any) {
       res.status(500).json({ error: err.message });
     }
@@ -334,7 +373,7 @@ async function startServer() {
       const supabase = getSupabase();
       const { data: users, error } = await supabase
         .from('users')
-        .select('id, email, name, is_approved, is_admin, created_at')
+        .select('*')
         .order('created_at', { ascending: false });
       
       if (error) throw error;
@@ -349,12 +388,25 @@ async function startServer() {
     try {
       const supabase = getSupabase();
       
-      // Get user info for email
-      const { data: user } = await supabase.from('users').select('email, name').eq('id', userId).single();
+      // Get user info
+      const { data: user } = await supabase.from('users').select('*').eq('id', userId).single();
+      if (!user) return res.status(404).json({ error: 'User not found' });
+
+      // If superadmin, check if they are the last one
+      if (user.is_super_admin) {
+        const { count } = await supabase
+          .from('users')
+          .select('*', { count: 'exact', head: true })
+          .eq('is_super_admin', true);
+        
+        if (count && count <= 1) {
+          return res.status(400).json({ error: 'You are the only Super Administrator. You must promote someone else to Super Administrator before you can demote yourself.' });
+        }
+      }
 
       const { error } = await supabase
         .from('users')
-        .update({ is_admin: false })
+        .update({ is_admin: false, is_super_admin: false })
         .eq('id', userId);
       
       if (error) throw error;
@@ -372,6 +424,113 @@ async function startServer() {
               <p>Hello <strong>${user.name}</strong>,</p>
               <p>This is to confirm that you have successfully revoked your own administrative rights. You are now a standard user.</p>
               <p>If you need admin access again, please contact another administrator.</p>
+              <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e2e8f0;">
+                <p style="font-size: 14px; color: #64748b;">Best regards,<br>DLCF Admin Team</p>
+              </div>
+            </div>
+          `
+        });
+      }
+
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/admin/demote-admin', async (req, res) => {
+    const { userId, requesterId } = req.body;
+    try {
+      const supabase = getSupabase();
+      
+      // Verify requester is superadmin
+      const { data: requester, error: reqError } = await supabase.from('users').select('*').eq('id', requesterId).single();
+      
+      if (reqError || !requester) {
+        return res.status(403).json({ error: 'Authentication failed. Please log out and log back in.' });
+      }
+
+      if (requester.is_super_admin !== true) {
+        return res.status(403).json({ error: 'Access denied. Only Super Administrators can demote other admins.' });
+      }
+
+      // Get user info for email
+      const { data: user } = await supabase.from('users').select('email, name').eq('id', userId).single();
+
+      const { error } = await supabase
+        .from('users')
+        .update({ is_admin: false, is_super_admin: false })
+        .eq('id', userId);
+      
+      if (error) throw error;
+
+      // Send notification
+      if (user && process.env.SMTP_HOST) {
+        const transporter = getTransporter();
+        await transporter.sendMail({
+          from: `"DLCF E-Library" <${process.env.SMTP_USER}>`,
+          to: user.email,
+          subject: 'Admin Rights Revoked - DLCF E-Library',
+          html: `
+            <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 12px;">
+              <h2 style="color: #f43f5e;">Admin Rights Revoked</h2>
+              <p>Hello <strong>${user.name}</strong>,</p>
+              <p>This is to inform you that your administrative rights have been revoked by a Super Administrator.</p>
+              <p>You are now a standard user. If you believe this is an error, please contact the Super Admin team.</p>
+              <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e2e8f0;">
+                <p style="font-size: 14px; color: #64748b;">Best regards,<br>DLCF Admin Team</p>
+              </div>
+            </div>
+          `
+        });
+      }
+
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/admin/promote-superadmin', async (req, res) => {
+    const { userId, requesterId } = req.body;
+    try {
+      const supabase = getSupabase();
+      
+      // Verify requester is superadmin
+      const { data: requester, error: reqError } = await supabase.from('users').select('*').eq('id', requesterId).single();
+      
+      if (reqError || !requester) {
+        return res.status(403).json({ error: 'Authentication failed. Please log out and log back in.' });
+      }
+
+      if (requester.is_super_admin !== true) {
+        return res.status(403).json({ error: 'Access denied. Only Super Administrators can promote others to superadmin.' });
+      }
+
+      // Get user info
+      const { data: user } = await supabase.from('users').select('email, name').eq('id', userId).single();
+      if (!user) return res.status(404).json({ error: 'User not found' });
+
+      const { error } = await supabase
+        .from('users')
+        .update({ is_super_admin: true, is_admin: true, is_approved: true })
+        .eq('id', userId);
+      
+      if (error) throw error;
+
+      // Send notification
+      if (process.env.SMTP_HOST) {
+        const transporter = getTransporter();
+        await transporter.sendMail({
+          from: `"DLCF E-Library" <${process.env.SMTP_USER}>`,
+          to: user.email,
+          subject: 'You have been promoted to Super Admin - DLCF E-Library',
+          html: `
+            <div style="font-family: sans-serif; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #e2e8f0; border-radius: 12px;">
+              <h2 style="color: #d97706;">Super Admin Promotion</h2>
+              <p>Hello <strong>${user.name}</strong>,</p>
+              <p>You have been promoted to a <strong>Super Administrator</strong> for the DLCF E-Library.</p>
+              <p>You now have the highest level of administrative privileges, including the ability to manage other administrators.</p>
               <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e2e8f0;">
                 <p style="font-size: 14px; color: #64748b;">Best regards,<br>DLCF Admin Team</p>
               </div>
@@ -646,6 +805,22 @@ async function startServer() {
     }
   });
 
+  app.put('/api/admin/books/:id', async (req, res) => {
+    const { id } = req.params;
+    try {
+      const supabase = getSupabase();
+      const { error } = await supabase
+        .from('books')
+        .update(req.body)
+        .eq('id', id);
+      
+      if (error) throw error;
+      res.json({ success: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // File Upload to Supabase Storage
   app.post('/api/admin/upload', upload.single('file'), async (req: any, res) => {
     console.log(`[Upload] Received upload request: ${req.file?.originalname} (${req.file?.size} bytes)`);
@@ -686,15 +861,17 @@ async function startServer() {
   });
 
   app.post('/api/admin/mass-upload-gdrive', async (req, res) => {
-    let { folderId, department, level, category, courseCode: manualCourseCode, materialType } = req.body;
+    let { folderId, department, level, category, courseCode: manualCourseCode, courseTitle: manualCourseTitle, materialType } = req.body;
     const apiKey = process.env.GOOGLE_DRIVE_API_KEY;
 
     console.log(`[Mass Upload] Starting request for folder: ${folderId}, Course: ${manualCourseCode}, Type: ${materialType}`);
 
     if (!apiKey) {
-      console.error('[Mass Upload] GOOGLE_DRIVE_API_KEY missing');
-      return res.status(400).json({ error: 'GOOGLE_DRIVE_API_KEY is not configured in the environment.' });
+      console.error('[Mass Upload] CRITICAL: GOOGLE_DRIVE_API_KEY is missing from environment variables.');
+      return res.status(400).json({ error: 'GOOGLE_DRIVE_API_KEY is not configured in the environment. Please check your project secrets.' });
     }
+
+    console.log(`[Mass Upload] API Key present (length: ${apiKey.length}). Attempting to list files...`);
 
     if (!folderId) {
       return res.status(400).json({ error: 'Folder ID is required.' });
@@ -764,15 +941,16 @@ async function startServer() {
             .getPublicUrl(fileName);
 
           // Create book record
-          // Try to extract course code from file name if not manually provided
-          const nameParts = file.name?.split(' - ') || [];
-          let courseCode = manualCourseCode || (nameParts.length > 1 ? nameParts[0].trim().toUpperCase() : 'GENERAL');
-          let title = nameParts.length > 1 ? nameParts[1].replace('.pdf', '').trim() : file.name?.replace('.pdf', '').trim();
-
+          // Use manual course code and title from form for the directory grouping
+          const courseCode = manualCourseCode || 'GENERAL';
           // If it's a Christian Novel, use filename as title and clear courseCode
+          let title = file.name?.replace('.pdf', '').trim() || 'Untitled Material';
+          let finalCourseCode = courseCode;
+          let finalCourseTitle = manualCourseTitle || courseCode; // Use manual title if provided, else fallback to code
+
           if (category === 'Christian Novel') {
-            title = file.name?.replace('.pdf', '').trim();
-            courseCode = ''; // Novels don't have course codes
+            finalCourseCode = ''; 
+            finalCourseTitle = '';
           }
 
           // Duplicate Check
@@ -781,7 +959,7 @@ async function startServer() {
             .select('id')
             .eq('title', title)
             .eq('category', category)
-            .eq('course_code', courseCode || '');
+            .eq('course_code', finalCourseCode || '');
 
           if (existingBooks && existingBooks.length > 0) {
             console.log(`[Mass Upload] Skipping duplicate: ${title} (${courseCode})`);
@@ -811,8 +989,8 @@ async function startServer() {
             category,
             department,
             level,
-            course_code: courseCode,
-            course_title: title,
+            course_code: finalCourseCode,
+            course_title: finalCourseTitle,
             material_type: detectedMaterialType,
             download_url: publicUrl,
             cover_url: 'https://picsum.photos/seed/book/400/600', // Default cover for mass upload

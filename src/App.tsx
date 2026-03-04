@@ -30,7 +30,9 @@ import {
   Eye,
   EyeOff,
   ShieldAlert,
-  Info
+  Info,
+  Edit,
+  Trash2
 } from 'lucide-react';
 import * as pdfjsLib from 'pdfjs-dist';
 import { Book, BookCategory, FilterState, User, RegistrationLink } from './types';
@@ -60,7 +62,7 @@ export default function App() {
   const [revokedModal, setRevokedModal] = useState<{ message: string } | null>(null);
   const [confirmModal, setConfirmModal] = useState<{ 
     id?: string; 
-    type: 'book' | 'link' | 'logout' | 'revoke' | 'restore' | 'demote' | 'promote'; 
+    type: 'book' | 'link' | 'logout' | 'revoke' | 'restore' | 'demote' | 'promote' | 'promote-super'; 
     title: string;
     message?: string;
     action: () => void;
@@ -71,6 +73,8 @@ export default function App() {
   const [userSearch, setUserSearch] = useState('');
   const [adminLinks, setAdminLinks] = useState<RegistrationLink[]>([]);
   const [adminTab, setAdminTab] = useState<'users' | 'books' | 'mass-upload'>('users');
+  const [adminBookSearch, setAdminBookSearch] = useState('');
+  const [editingBook, setEditingBook] = useState<Book | null>(null);
   const [formCategory, setFormCategory] = useState<BookCategory>(BookCategory.ACADEMIC);
   const [massUploadCategory, setMassUploadCategory] = useState<BookCategory>(BookCategory.ACADEMIC);
   const [loading, setLoading] = useState(false);
@@ -335,7 +339,7 @@ export default function App() {
             body: JSON.stringify({ userId: user?.id }),
           });
           if (res.ok) {
-            const updatedUser = { ...user!, isAdmin: false };
+            const updatedUser = { ...user!, isAdmin: false, isSuperAdmin: false };
             setUser(updatedUser);
             localStorage.setItem('dlcf_user', JSON.stringify(updatedUser));
             showToast('Admin rights revoked successfully');
@@ -382,8 +386,79 @@ export default function App() {
     });
   };
 
+  const demoteAdmin = (userId: string, userName: string) => {
+    setConfirmModal({
+      id: userId,
+      type: 'demote',
+      title: 'Revoke Admin Access',
+      message: `Are you sure you want to revoke administrative rights from ${userName}? Only Superadmins can perform this action.`,
+      action: async () => {
+        try {
+          const res = await fetch('/api/admin/demote-admin', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ userId, requesterId: user?.id }),
+          });
+          if (res.ok) {
+            showToast(`${userName} is no longer an Admin`);
+            fetchAdminData();
+          } else {
+            const data = await res.json();
+            showToast(data.error || 'Failed to demote admin', 'error');
+          }
+        } catch (err) {
+          showToast('Connection error', 'error');
+        } finally {
+          setConfirmModal(null);
+        }
+      }
+    });
+  };
+
+  const promoteToSuperAdmin = (userId: string, userName: string) => {
+    setConfirmModal({
+      id: userId,
+      type: 'promote-super',
+      title: 'Promote to Super Admin',
+      message: `Are you sure you want to promote ${userName} to a Super Administrator? They will have the highest level of control, including the ability to manage other administrators.`,
+      action: async () => {
+        try {
+          const res = await fetch('/api/admin/promote-superadmin', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ userId, requesterId: user?.id }),
+          });
+          if (res.ok) {
+            showToast(`${userName} has been promoted to Super Admin`);
+            fetchAdminData();
+          } else {
+            const data = await res.json();
+            showToast(data.error || 'Failed to promote to Super Admin', 'error');
+          }
+        } catch (err) {
+          showToast('Connection error', 'error');
+        } finally {
+          setConfirmModal(null);
+        }
+      }
+    });
+  };
+
   const fetchAdminData = async () => {
     if (!user?.isAdmin) return;
+    
+    // Refresh user session to pick up superadmin status changes
+    try {
+      const meRes = await fetch(`/api/auth/me?userId=${user.id}`);
+      if (meRes.ok) {
+        const meData = await meRes.json();
+        setUser(meData.user);
+        localStorage.setItem('dlcf_user', JSON.stringify(meData.user));
+      }
+    } catch (err) {
+      console.error('Failed to refresh session:', err);
+    }
+
     try {
       const [usersRes, linksRes, booksRes] = await Promise.all([
         fetch('/api/admin/users'),
@@ -705,6 +780,46 @@ export default function App() {
     }
   };
 
+  const handleUpdateBook = async (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    if (!editingBook) return;
+
+    const formData = new FormData(e.currentTarget);
+    const updates: any = {
+      title: formData.get('title'),
+      author: formData.get('author'),
+      category: formData.get('category'),
+      department: formData.get('department'),
+      level: formData.get('level'),
+      course_code: formData.get('course_code'),
+      course_title: formData.get('course_title'),
+      material_type: formData.get('material_type'),
+      description: formData.get('description'),
+    };
+
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/admin/books/${editingBook.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates),
+      });
+
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || 'Failed to update material');
+      }
+
+      showToast('Material updated successfully');
+      setEditingBook(null);
+      fetchBooks();
+    } catch (err: any) {
+      showToast(err.message, 'error');
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const handleMassUpload = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const formData = new FormData(e.currentTarget);
@@ -713,6 +828,7 @@ export default function App() {
     const level = formData.get('level');
     const category = formData.get('category');
     const courseCode = formData.get('courseCode');
+    const courseTitle = formData.get('courseTitle');
     const materialType = formData.get('materialType');
 
     setLoading(true);
@@ -721,7 +837,7 @@ export default function App() {
       const res = await fetch('/api/admin/mass-upload-gdrive', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ folderId, department, level, category, courseCode, materialType }),
+        body: JSON.stringify({ folderId, department, level, category, courseCode, courseTitle, materialType }),
       });
       const data = await res.json();
       if (res.ok) {
@@ -759,6 +875,22 @@ export default function App() {
       return matchesSearch && matchesCategory && matchesDept && matchesLevel;
     });
   }, [books, filters]);
+
+  const groupedAdminBooks = useMemo<{ [key: string]: Book[] }>(() => {
+    const filtered = books.filter(b => 
+      b.title.toLowerCase().includes(adminBookSearch.toLowerCase()) ||
+      (b.courseCode || '').toLowerCase().includes(adminBookSearch.toLowerCase()) ||
+      (b.author || '').toLowerCase().includes(adminBookSearch.toLowerCase())
+    );
+
+    const groups: { [key: string]: Book[] } = {};
+    filtered.forEach(b => {
+      const key = b.category === BookCategory.ACADEMIC ? (b.courseCode || 'GENERAL') : 'Christian Novels';
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(b);
+    });
+    return groups;
+  }, [books, adminBookSearch]);
 
   const groupedCourses = useMemo(() => {
     if (filters.category !== BookCategory.ACADEMIC) return [];
@@ -805,11 +937,21 @@ export default function App() {
   }, [filteredBooks, selectedCourse]);
 
   const filteredUsers = useMemo(() => {
-    if (!userSearch) return allUsers;
-    return allUsers.filter(u => 
-      u.name.toLowerCase().includes(userSearch.toLowerCase()) || 
-      u.email.toLowerCase().includes(userSearch.toLowerCase())
-    );
+    const filtered = !userSearch 
+      ? allUsers 
+      : allUsers.filter(u => 
+          u.name.toLowerCase().includes(userSearch.toLowerCase()) || 
+          u.email.toLowerCase().includes(userSearch.toLowerCase())
+        );
+    
+    // Sort: superadmins, then admins, then others
+    return [...filtered].sort((a, b) => {
+      if (a.is_super_admin && !b.is_super_admin) return -1;
+      if (!a.is_super_admin && b.is_super_admin) return 1;
+      if (a.is_admin && !b.is_admin) return -1;
+      if (!a.is_admin && b.is_admin) return 1;
+      return 0;
+    });
   }, [allUsers, userSearch]);
 
   // --- Views ---
@@ -1261,13 +1403,16 @@ export default function App() {
                     {filteredUsers.length > 0 ? filteredUsers.map(u => (
                       <div key={u.id} className="p-4 sm:p-6 flex flex-col sm:flex-row sm:items-center justify-between hover:bg-slate-50/50 transition-colors gap-4">
                         <div className="flex items-center gap-4 min-w-0">
-                          <div className={`w-10 h-10 rounded-full flex-shrink-0 flex items-center justify-center font-bold ${u.is_admin ? 'bg-blue-100 text-blue-600' : u.is_approved ? 'bg-emerald-100 text-emerald-600' : 'bg-rose-100 text-rose-600'}`}>
+                          <div className={`w-10 h-10 rounded-full flex-shrink-0 flex items-center justify-center font-bold ${u.is_super_admin ? 'bg-amber-100 text-amber-600' : u.is_admin ? 'bg-blue-100 text-blue-600' : u.is_approved ? 'bg-emerald-100 text-emerald-600' : 'bg-rose-100 text-rose-600'}`}>
                             {u.name.charAt(0)}
                           </div>
                           <div className="min-w-0">
                             <div className="flex flex-wrap items-center gap-2">
                               <h4 className="font-bold text-slate-800 truncate">{u.name}</h4>
-                              {u.is_admin && (
+                              {u.is_super_admin && (
+                                <span className="px-1.5 py-0.5 bg-amber-50 text-amber-600 text-[10px] font-bold rounded uppercase">Super Admin</span>
+                              )}
+                              {u.is_admin && !u.is_super_admin && (
                                 <span className="px-1.5 py-0.5 bg-blue-50 text-blue-600 text-[10px] font-bold rounded uppercase">Admin</span>
                               )}
                               {!u.is_approved && !u.is_admin && (
@@ -1319,9 +1464,26 @@ export default function App() {
                                 )}
                               </button>
                             </>
+                          ) : user?.isSuperAdmin && !u.is_super_admin ? (
+                            <div className="flex flex-1 sm:flex-none items-center gap-2">
+                              <button 
+                                onClick={() => promoteToSuperAdmin(u.id, u.name)}
+                                className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 py-2 text-sm font-bold rounded-xl transition-all shadow-lg bg-amber-600 text-white hover:bg-amber-700 shadow-amber-600/10"
+                              >
+                                <ShieldCheck className="w-4 h-4" />
+                                Promote Super
+                              </button>
+                              <button 
+                                onClick={() => demoteAdmin(u.id, u.name)}
+                                className="flex-1 sm:flex-none flex items-center justify-center gap-2 px-4 py-2 text-sm font-bold rounded-xl transition-all shadow-lg bg-rose-50 text-rose-600 hover:bg-rose-100 shadow-rose-600/5"
+                              >
+                                <ShieldAlert className="w-4 h-4" />
+                                Revoke Admin
+                              </button>
+                            </div>
                           ) : (
                             <span className="text-xs text-slate-400 font-medium italic px-4 py-2">
-                              Admin Access Protected
+                              {u.is_super_admin ? 'Super Admin Protected' : 'Admin Access Protected'}
                             </span>
                           )}
                         </div>
@@ -1419,20 +1581,36 @@ export default function App() {
                     </div>
 
                     {massUploadCategory === BookCategory.ACADEMIC && (
-                      <div className="md:col-span-1">
-                        <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 ml-1">
-                          Course Code
-                        </label>
-                        <input 
-                          name="courseCode"
-                          type="text" 
-                          required
-                          placeholder="e.g. CSC 101"
-                          className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
-                        />
-                        <p className="mt-1.5 text-[10px] text-slate-400 ml-1 italic">
-                          Note: Please copy the link per course folder (e.g., CSC 101 folder) to ensure files are correctly categorized. Avoid pasting links to parent folders containing multiple subfolders.
-                        </p>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                        <div>
+                          <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 ml-1">
+                            Course Code
+                          </label>
+                          <input 
+                            name="courseCode"
+                            type="text" 
+                            required
+                            placeholder="e.g. CSC 101"
+                            className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 ml-1">
+                            Course Title (Directory Name)
+                          </label>
+                          <input 
+                            name="courseTitle"
+                            type="text" 
+                            required
+                            placeholder="e.g. Intro to Computer Science"
+                            className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
+                          />
+                        </div>
+                        <div className="sm:col-span-2">
+                          <p className="mt-1.5 text-[10px] text-slate-400 ml-1 italic">
+                            Note: Please copy the link per course folder (e.g., CSC 101 folder) to ensure files are correctly categorized. Avoid pasting links to parent folders containing multiple subfolders.
+                          </p>
+                        </div>
                       </div>
                     )}
 
@@ -1627,36 +1805,80 @@ export default function App() {
               {/* Books List */}
               <div className="lg:col-span-2 space-y-6">
                 <div className="bg-white rounded-3xl border border-slate-200 overflow-hidden">
-                  <div className="p-6 border-b border-slate-100 flex items-center justify-between">
+                  <div className="p-6 border-b border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                     <div className="flex items-center gap-3">
                       <div className="bg-blue-100 p-2 rounded-xl">
                         <Library className="w-5 h-5 text-blue-600" />
                       </div>
-                      <h2 className="text-lg font-bold text-slate-800">Current Materials</h2>
+                      <h2 className="text-lg font-bold text-slate-800">Manage Materials</h2>
                     </div>
-                    <span className="px-2.5 py-1 bg-blue-50 text-blue-700 text-xs font-bold rounded-full">
-                      {books.length} Items
-                    </span>
+                    <div className="relative flex-1 max-w-xs">
+                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+                      <input 
+                        type="text"
+                        placeholder="Search materials..."
+                        className="w-full pl-10 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
+                        value={adminBookSearch}
+                        onChange={(e) => setAdminBookSearch(e.target.value)}
+                      />
+                    </div>
                   </div>
-                  <div className="divide-y divide-slate-50 overflow-x-auto">
-                    {books.map(book => (
-                      <div key={book.id} className="p-4 sm:p-6 flex items-center justify-between hover:bg-slate-50/50 transition-colors gap-4">
-                        <div className="flex items-center gap-4 min-w-0">
-                          <img src={book.coverUrl || book.cover_url} className="w-10 h-14 sm:w-12 sm:h-16 object-cover rounded-lg shadow-sm flex-shrink-0" referrerPolicy="no-referrer" />
-                          <div className="min-w-0">
-                            <h4 className="font-bold text-slate-800 truncate">{book.title}</h4>
-                            <p className="text-xs text-slate-400 truncate">{book.author} • {book.category}</p>
-                          </div>
+                  
+                  <div className="p-6 space-y-8 max-h-[800px] overflow-y-auto">
+                    {(Object.entries(groupedAdminBooks) as [string, Book[]][]).length > 0 ? (Object.entries(groupedAdminBooks) as [string, Book[]][]).map(([group, groupBooks]) => (
+                      <div key={group} className="space-y-4">
+                        <div className="flex items-center gap-3">
+                          <span className="px-3 py-1 bg-slate-900 text-white text-[10px] font-bold rounded-full uppercase tracking-widest">
+                            {group}
+                          </span>
+                          <div className="h-px flex-1 bg-slate-100" />
+                          <span className="text-[10px] font-bold text-slate-400 uppercase">
+                            {groupBooks.length} Items
+                          </span>
                         </div>
-                        <button 
-                          onClick={() => deleteBook(book.id)}
-                          className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-xl transition-all flex-shrink-0"
-                          title="Delete Material"
-                        >
-                          <X className="w-5 h-5" />
-                        </button>
+                        
+                        <div className="grid grid-cols-1 gap-3">
+                          {groupBooks.map(book => (
+                            <div key={book.id} className="p-4 bg-slate-50/50 rounded-2xl border border-slate-100 flex items-center justify-between group hover:bg-white hover:shadow-md transition-all">
+                              <div className="flex items-center gap-4 min-w-0">
+                                <img src={book.coverUrl} className="w-10 h-14 object-cover rounded-lg shadow-sm flex-shrink-0" referrerPolicy="no-referrer" />
+                                <div className="min-w-0">
+                                  <h4 className="font-bold text-slate-800 truncate text-sm">{book.title}</h4>
+                                  <div className="flex items-center gap-2 mt-1">
+                                    <span className="text-[10px] font-medium text-slate-400 truncate">
+                                      {book.materialType || 'Material'} • {book.department || 'General'}
+                                    </span>
+                                  </div>
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                <button 
+                                  onClick={() => setEditingBook(book)}
+                                  className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-xl transition-all"
+                                  title="Edit Material"
+                                >
+                                  <Edit className="w-4 h-4" />
+                                </button>
+                                <button 
+                                  onClick={() => deleteBook(book.id)}
+                                  className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-xl transition-all"
+                                  title="Delete Material"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
                       </div>
-                    ))}
+                    )) : (
+                      <div className="py-20 text-center">
+                        <div className="bg-slate-50 w-16 h-16 rounded-full flex items-center justify-center mx-auto mb-4">
+                          <Search className="w-8 h-8 text-slate-300" />
+                        </div>
+                        <p className="text-slate-400 text-sm">No materials found matching your search.</p>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -1850,11 +2072,11 @@ export default function App() {
                           </span>
                         </div>
                       </div>
-                      <div className="p-6 text-center">
-                        <h3 className="text-lg font-bold text-slate-800 group-hover:text-emerald-600 transition-colors">
+                      <div className="p-3 sm:p-6 text-center">
+                        <h3 className="text-sm sm:text-lg font-bold text-slate-800 group-hover:text-emerald-600 transition-colors line-clamp-1">
                           {type.name}s
                         </h3>
-                        <p className="text-sm text-slate-400 mt-1">Directory for {selectedCourse}</p>
+                        <p className="text-[10px] sm:text-sm text-slate-400 mt-0.5 sm:mt-1">Directory for {selectedCourse}</p>
                       </div>
                     </motion.div>
                   ))}
@@ -1902,23 +2124,23 @@ export default function App() {
                           )}
                         </div>
                       </div>
-                      <div className="p-4">
-                        <div className="mb-1">
+                      <div className="p-3 sm:p-4">
+                        <div className="mb-0.5 sm:mb-1">
                           {book.courseCode && (
-                            <span className="text-[10px] font-bold text-emerald-600 uppercase tracking-widest">{book.courseCode}</span>
+                            <span className="text-[8px] sm:text-[10px] font-bold text-emerald-600 uppercase tracking-widest">{book.courseCode}</span>
                           )}
                         </div>
-                        <h3 className="font-bold text-slate-800 line-clamp-1 group-hover:text-emerald-600 transition-colors">{book.title}</h3>
-                        <p className="text-sm text-slate-500 mb-3">{book.author}</p>
+                        <h3 className="text-sm sm:text-base font-bold text-slate-800 line-clamp-1 group-hover:text-emerald-600 transition-colors">{book.title}</h3>
+                        <p className="text-[10px] sm:text-sm text-slate-500 mb-2 sm:mb-3">{book.author}</p>
                         
                         {book.category === BookCategory.ACADEMIC && (
-                          <div className="flex items-center gap-2 text-[11px] text-slate-400 border-t border-slate-100 pt-3">
+                          <div className="flex items-center gap-2 text-[9px] sm:text-[11px] text-slate-400 border-t border-slate-100 pt-2 sm:pt-3">
                             <GraduationCap className="w-3 h-3" />
                             <span className="truncate">{book.department}</span>
                           </div>
                         )}
                         {book.category === BookCategory.CHRISTIAN_NOVEL && (
-                          <div className="flex items-center gap-2 text-[11px] text-slate-400 border-t border-slate-100 pt-3">
+                          <div className="flex items-center gap-2 text-[9px] sm:text-[11px] text-slate-400 border-t border-slate-100 pt-2 sm:pt-3">
                             <BookOpen className="w-3 h-3" />
                             <span>Christian Literature</span>
                           </div>
@@ -2197,6 +2419,137 @@ export default function App() {
                   Understood
                 </button>
               </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Edit Book Modal */}
+      <AnimatePresence>
+        {editingBook && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setEditingBook(null)}
+              className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.9, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.9, y: 20 }}
+              className="relative w-full max-w-2xl bg-white rounded-3xl shadow-2xl overflow-hidden border border-slate-100"
+            >
+              <div className="p-6 border-b border-slate-100 flex items-center justify-between bg-slate-50/50">
+                <div className="flex items-center gap-3">
+                  <div className="bg-emerald-100 p-2 rounded-xl">
+                    <Edit className="w-5 h-5 text-emerald-600" />
+                  </div>
+                  <h3 className="text-lg font-bold text-slate-800">Edit Material</h3>
+                </div>
+                <button onClick={() => setEditingBook(null)} className="p-2 hover:bg-slate-200 rounded-xl transition-colors">
+                  <X className="w-5 h-5 text-slate-400" />
+                </button>
+              </div>
+              
+              <form onSubmit={handleUpdateBook} className="p-8 space-y-6 max-h-[70vh] overflow-y-auto">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                  <div className="sm:col-span-2">
+                    <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 ml-1">Title</label>
+                    <input 
+                      name="title"
+                      defaultValue={editingBook.title}
+                      required
+                      className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
+                    />
+                  </div>
+                  
+                  <div>
+                    <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 ml-1">Category</label>
+                    <select 
+                      name="category"
+                      defaultValue={editingBook.category}
+                      required
+                      className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:outline-none"
+                    >
+                      <option value={BookCategory.ACADEMIC}>Academic</option>
+                      <option value={BookCategory.CHRISTIAN_NOVEL}>Christian Novel</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 ml-1">Material Type</label>
+                    <select 
+                      name="material_type"
+                      defaultValue={editingBook.materialType}
+                      className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:outline-none"
+                    >
+                      <option value="Course Material">Course Material</option>
+                      <option value="Past Question">Past Question</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 ml-1">Course Code</label>
+                    <input 
+                      name="course_code"
+                      defaultValue={editingBook.courseCode}
+                      className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 ml-1">Course Title</label>
+                    <input 
+                      name="course_title"
+                      defaultValue={editingBook.courseTitle}
+                      className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:outline-none"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 ml-1">Department</label>
+                    <select 
+                      name="department"
+                      defaultValue={editingBook.department}
+                      className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:outline-none"
+                    >
+                      <option value="">None</option>
+                      {DEPARTMENTS.map(d => <option key={d} value={d}>{d}</option>)}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2 ml-1">Level</label>
+                    <select 
+                      name="level"
+                      defaultValue={editingBook.level}
+                      className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm focus:outline-none"
+                    >
+                      <option value="">None</option>
+                      {LEVELS.map(l => <option key={l} value={l}>{l}</option>)}
+                    </select>
+                  </div>
+                </div>
+
+                <div className="flex gap-4 pt-4">
+                  <button
+                    type="button"
+                    onClick={() => setEditingBook(null)}
+                    className="flex-1 px-6 py-3 bg-slate-100 text-slate-600 font-bold rounded-2xl hover:bg-slate-200 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={loading}
+                    className="flex-1 px-6 py-3 bg-emerald-600 text-white font-bold rounded-2xl hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-600/20 disabled:opacity-50"
+                  >
+                    {loading ? 'Saving...' : 'Save Changes'}
+                  </button>
+                </div>
+              </form>
             </motion.div>
           </div>
         )}

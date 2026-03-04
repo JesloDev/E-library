@@ -4,6 +4,7 @@ export interface User {
   email: string;
   name: string;
   isAdmin: boolean;
+  isSuperAdmin?: boolean;
 }
 
 export interface RegistrationLink {
