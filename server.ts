@@ -1,6 +1,6 @@
 import express from 'express';
-import { createServer as createViteServer } from 'vite';
 import { createClient } from '@supabase/supabase-js';
+import bcrypt from 'bcryptjs';
 import { v4 as uuidv4 } from 'uuid';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -125,33 +125,31 @@ const sendWelcomeEmail = async (email: string, name: string) => {
   }
 };
 
-// Lazy Supabase Client Initialization
+// Lazy Supabase Client Initialization (Requires Vercel redeployment after adding SUPABASE_SERVICE_ROLE_KEY)
 let supabaseClient: any = null;
 
 function getSupabase() {
   if (!supabaseClient) {
     const url = process.env.SUPABASE_URL;
-    const key = process.env.SUPABASE_ANON_KEY;
+    const key = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
     if (!url || !key) {
-      console.error('[Supabase] CRITICAL: SUPABASE_URL or SUPABASE_ANON_KEY is missing.');
-      throw new Error('SUPABASE_URL and SUPABASE_ANON_KEY are required. Please configure them in your environment variables.');
+      console.error('[Supabase] CRITICAL: SUPABASE_URL or SUPABASE_ANON_KEY/SUPABASE_SERVICE_ROLE_KEY is missing.');
+      throw new Error('SUPABASE_URL and either SUPABASE_ANON_KEY or SUPABASE_SERVICE_ROLE_KEY are required.');
     }
     supabaseClient = createClient(url, key);
   }
   return supabaseClient;
 }
 
-async function startServer() {
-  const app = express();
-  const PORT = parseInt(process.env.PORT || '3000', 10);
+const app = express();
 
-  app.use(express.json());
+app.use(express.json());
 
-  // Logging middleware
-  app.use((req, res, next) => {
-    console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);
-    next();
-  });
+// Logging middleware
+app.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} - ${req.method} ${req.url}`);
+  next();
+});
 
   // --- API Routes ---
 
@@ -164,21 +162,31 @@ async function startServer() {
     });
   };
 
-  // Auth - Login
-  app.post('/api/auth/login', async (req, res) => {
-    const { email, password } = req.body;
-    try {
-      const supabase = getSupabase();
-      const { data: user, error } = await supabase
-        .from('users')
-        .select('*')
-        .eq('email', email)
-        .eq('password', password)
-        .single();
-      
-      if (error || !user) {
-        return res.status(401).json({ error: 'Invalid credentials' });
-      }
+     // Auth - Login
+     app.post('/api/auth/login', async (req, res) => {
+       const { email, password } = req.body;
+       try {
+         const supabase = getSupabase();
+         const { data: user, error } = await supabase
+           .from('users')
+           .select('*')
+           .eq('email', email)
+           .single();
+         
+         if (error || !user) {
+           if (error) {
+             console.error('[Supabase Error in Login]:', error.message || error);
+           } else {
+             console.warn('[Login Failure]: No user found with provided email.');
+           }
+           return res.status(401).json({ error: 'Invalid credentials' });
+         }
+         
+         const passwordMatch = await bcrypt.compare(password, user.password);
+         if (!passwordMatch) {
+           console.warn('[Login Failure]: Password mismatch for email:', email);
+           return res.status(401).json({ error: 'Invalid credentials' });
+         }
       
       if (!user.is_approved && !user.is_admin) {
         return res.status(403).json({ 
@@ -242,10 +250,13 @@ async function startServer() {
         return res.status(400).json({ error: 'Invalid registration link' });
       }
 
+      // Hash the password securely with bcryptjs (10 salt rounds)
+      const hashedPassword = await bcrypt.hash(password, 10);
+
       // Create user (Automatically approved)
       const { error: regError } = await supabase
         .from('users')
-        .insert([{ id: uuidv4(), email, password, name, is_approved: true, is_admin: false }]);
+        .insert([{ id: uuidv4(), email, password: hashedPassword, name, is_approved: true, is_admin: false }]);
       
       if (regError) throw regError;
 
@@ -731,7 +742,7 @@ async function startServer() {
     if (error.message?.includes('Could not find') || error.code === '42703') {
       console.warn('[Supabase] Missing columns detected, falling back to description metadata');
       
-      const safeColumns = ['id', 'title', 'author', 'category', 'cover_url', 'download_url', 'description', 'created_at'];
+      const safeColumns = ['id', 'title', 'category', 'cover_url', 'download_url', 'description', 'created_at'];
       const fallbackData: any = {};
       const metadata: any = {};
 
@@ -754,6 +765,68 @@ async function startServer() {
         .insert([fallbackData])
         .select()
         .single();
+    }
+
+    return { data: null, error };
+  }
+
+  // Helper to update book with fallback for missing columns
+  async function updateBookResilient(supabase: any, id: string, bookData: any) {
+    // Try full update first
+    const { data, error } = await supabase
+      .from('books')
+      .update(bookData)
+      .eq('id', id)
+      .select();
+
+    if (!error) return { data, error: null };
+
+    // If error is about missing columns, try fallback
+    if (error.message?.includes('Could not find') || error.code === '42703') {
+      console.warn('[Supabase] Missing columns detected during update, falling back to description metadata');
+      
+      const safeColumns = ['id', 'title', 'category', 'cover_url', 'download_url', 'description', 'created_at'];
+      const fallbackData: any = {};
+      const metadata: any = {};
+
+      Object.keys(bookData).forEach(key => {
+        if (safeColumns.includes(key)) {
+          fallbackData[key] = bookData[key];
+        } else {
+          metadata[key] = bookData[key];
+        }
+      });
+
+      // Fetch the existing description first
+      const { data: existingBook } = await supabase
+        .from('books')
+        .select('description')
+        .eq('id', id)
+        .single();
+
+      let existingMetadata: any = {};
+      let cleanDescription = existingBook?.description || '';
+
+      if (cleanDescription.includes('JSON_META:')) {
+        const parts = cleanDescription.split('JSON_META:');
+        cleanDescription = parts[0].trim();
+        try {
+          existingMetadata = JSON.parse(parts[1]);
+        } catch (e) {}
+      }
+
+      // Merge new metadata over existing metadata
+      const mergedMetadata = { ...existingMetadata, ...metadata };
+      const metaString = `JSON_META:${JSON.stringify(mergedMetadata)}`;
+      fallbackData.description = cleanDescription 
+        ? `${cleanDescription}\n\n${metaString}`
+        : metaString;
+
+      return await supabase
+        .from('books')
+        .update(fallbackData)
+        .eq('id', id)
+        .select();
     }
 
     return { data: null, error };
@@ -832,10 +905,7 @@ async function startServer() {
     const { id } = req.params;
     try {
       const supabase = getSupabase();
-      const { error } = await supabase
-        .from('books')
-        .update(req.body)
-        .eq('id', id);
+      const { error } = await updateBookResilient(supabase, id, req.body);
       
       if (error) throw error;
       res.json({ success: true });
@@ -876,7 +946,13 @@ async function startServer() {
         .from(bucketName)
         .getPublicUrl(fileName);
 
-      res.json({ url: publicUrl });
+      res.json({ 
+        url: publicUrl,
+        file_key: fileName,
+        file_name: req.file.originalname,
+        mime_type: req.file.mimetype,
+        file_size: req.file.size
+      });
     } catch (err: any) {
       console.error('Upload error:', err);
       res.status(500).json({ error: err.message });
@@ -884,58 +960,79 @@ async function startServer() {
   });
 
   app.post('/api/admin/mass-upload-gdrive', async (req, res) => {
-    let { folderId, department, level, category, courseCode: manualCourseCode, courseTitle: manualCourseTitle, materialType } = req.body;
+    let { folderId, department, level, category, courseCode: manualCourseCode, courseTitle: manualCourseTitle, materialType, uploaderId } = req.body;
     const apiKey = process.env.GOOGLE_DRIVE_API_KEY;
 
-    console.log(`[Mass Upload] Starting request for folder: ${folderId}, Course: ${manualCourseCode}, Type: ${materialType}`);
+    console.log(`[Mass Upload] Starting request for resource: ${folderId}, Course: ${manualCourseCode}, Type: ${materialType}`);
 
     if (!apiKey) {
       console.error('[Mass Upload] CRITICAL: GOOGLE_DRIVE_API_KEY is missing from environment variables.');
       return res.status(400).json({ error: 'GOOGLE_DRIVE_API_KEY is not configured in the environment. Please check your project secrets.' });
     }
 
-    console.log(`[Mass Upload] API Key present (length: ${apiKey.length}). Attempting to list files...`);
-
     if (!folderId) {
-      return res.status(400).json({ error: 'Folder ID is required.' });
+      return res.status(400).json({ error: 'Folder ID or File ID is required.' });
     }
 
+    let isFolder = true;
     // Extract ID from URL if user pasted a full link
     if (folderId.includes('drive.google.com')) {
-      const match = folderId.match(/\/folders\/([a-zA-Z0-9_-]+)/);
-      if (match) {
-        folderId = match[1];
+      const folderMatch = folderId.match(/\/folders\/([a-zA-Z0-9_-]+)/);
+      const fileMatch = folderId.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
+      if (folderMatch) {
+        folderId = folderMatch[1];
+        isFolder = true;
         console.log(`[Mass Upload] Extracted folder ID from URL: ${folderId}`);
+      } else if (fileMatch) {
+        folderId = fileMatch[1];
+        isFolder = false;
+        console.log(`[Mass Upload] Extracted file ID from URL: ${folderId}`);
       }
     }
 
     try {
       const drive = google.drive({ version: 'v3', auth: apiKey });
-      
-      console.log('[Mass Upload] Fetching file list from GDrive...');
-      // List files in the folder
-      const response = await drive.files.list({
-        q: `'${folderId}' in parents and mimeType = 'application/pdf' and trashed = false`,
-        fields: 'files(id, name, size, mimeType)',
-      }).catch(err => {
-        console.error('[Mass Upload] GDrive API List Error:', err.message);
-        if (err.message.includes('File not found')) {
-          throw new Error('Google Drive Folder not found. Please check the ID and ensure the folder is shared as "Public".');
-        }
-        throw err;
-      });
-
-      const files = response.data.files || [];
-      console.log(`[Mass Upload] Found ${files.length} PDF files`);
-
-      if (files.length === 0) {
-        return res.json({ success: true, message: 'No PDF files found in the specified folder.', count: 0 });
-      }
-
       const supabase = getSupabase();
       await ensureBucket(supabase);
       const bucketName = 'materials';
       const results = [];
+      let files = [];
+
+      if (isFolder) {
+        console.log('[Mass Upload] Fetching file list from GDrive folder...');
+        // List all files (excluding folders) in the folder
+        const response = await drive.files.list({
+          q: `'${folderId}' in parents and trashed = false and mimeType != 'application/vnd.google-apps.folder'`,
+          fields: 'files(id, name, size, mimeType)',
+        }).catch(err => {
+          console.error('[Mass Upload] GDrive API List Error:', err.message);
+          if (err.message.includes('File not found')) {
+            throw new Error('Google Drive Folder not found. Please check the ID and ensure the folder is shared as "Public".');
+          }
+          throw err;
+        });
+        files = response.data.files || [];
+        console.log(`[Mass Upload] Found ${files.length} files in folder`);
+      } else {
+        console.log('[Mass Upload] Fetching file metadata from GDrive for single file...');
+        // Get single file metadata
+        const response = await drive.files.get({
+          fileId: folderId,
+          fields: 'id, name, size, mimeType'
+        }).catch(err => {
+          console.error('[Mass Upload] GDrive API Get Error:', err.message);
+          if (err.message.includes('File not found')) {
+            throw new Error('Google Drive File not found. Please check the ID and ensure the file is shared as "Public".');
+          }
+          throw err;
+        });
+        files = [response.data];
+        console.log(`[Mass Upload] Target file: ${files[0].name}`);
+      }
+
+      if (files.length === 0) {
+        return res.json({ success: true, message: 'No valid files found.', count: 0 });
+      }
 
       for (const file of files) {
         try {
@@ -953,7 +1050,7 @@ async function startServer() {
           const { error: uploadError } = await supabase.storage
             .from(bucketName)
             .upload(fileName, buffer, {
-              contentType: 'application/pdf',
+              contentType: file.mimeType || 'application/octet-stream',
               upsert: true
             });
 
@@ -964,12 +1061,11 @@ async function startServer() {
             .getPublicUrl(fileName);
 
           // Create book record
-          // Use manual course code and title from form for the directory grouping
           const courseCode = manualCourseCode || 'GENERAL';
           // If it's a Christian Novel, use filename as title and clear courseCode
-          let title = file.name?.replace('.pdf', '').trim() || 'Untitled Material';
+          let title = file.name ? file.name.replace(/\.[^/.]+$/, '').trim() : 'Untitled Material';
           let finalCourseCode = courseCode;
-          let finalCourseTitle = manualCourseTitle || courseCode; // Use manual title if provided, else fallback to code
+          let finalCourseTitle = manualCourseTitle || courseCode;
 
           if (category === 'Christian Novel') {
             finalCourseCode = ''; 
@@ -1008,7 +1104,6 @@ async function startServer() {
           const bookData = {
             id: uuidv4(),
             title,
-            author: 'DLCF Library',
             category,
             department,
             level,
@@ -1016,8 +1111,14 @@ async function startServer() {
             course_title: finalCourseTitle,
             material_type: detectedMaterialType,
             download_url: publicUrl,
-            cover_url: 'https://picsum.photos/seed/book/400/600', // Default cover for mass upload
-            description: `Mass uploaded from Google Drive: ${file.name}`
+            cover_url: 'https://picsum.photos/seed/book/400/600', // Default cover
+            description: `Mass uploaded from Google Drive: ${file.name}`,
+            // Store file metadata
+            file_key: fileName,
+            file_name: file.name,
+            mime_type: file.mimeType || 'application/octet-stream',
+            file_size: file.size ? parseInt(file.size, 10) : null,
+            uploader_id: uploaderId || null
           };
 
           const { data: dbData, error: dbError } = await insertBookResilient(supabase, bookData);
@@ -1041,28 +1142,33 @@ async function startServer() {
   // Apply API error handler to all /api routes
   app.use('/api', apiErrorHandler);
 
-  // Vite middleware for development
-  if (process.env.NODE_ENV !== 'production') {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
-    });
-    app.use(vite.middlewares);
-  } else {
-    // Serve static files from dist/client
-    const clientDistPath = path.join(__dirname, 'client');
-    console.log(`[Server] Serving static files from: ${clientDistPath}`);
-    
-    app.use(express.static(clientDistPath));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(clientDistPath, 'index.html'));
-    });
+  // Vite middleware for development (skip on Vercel serverless)
+  if (!process.env.VERCEL) {
+    (async () => {
+      const PORT = parseInt(process.env.PORT || '3000', 10);
+      if (process.env.NODE_ENV !== 'production') {
+        const { createServer: createViteServer } = await import('vite');
+        const vite = await createViteServer({
+          server: { middlewareMode: true },
+          appType: 'spa',
+        });
+        app.use(vite.middlewares);
+      } else {
+        // Serve static files from dist/client
+        const clientDistPath = path.join(__dirname, 'client');
+        console.log(`[Server] Serving static files from: ${clientDistPath}`);
+        
+        app.use(express.static(clientDistPath));
+        app.get('*', (req, res) => {
+          res.sendFile(path.join(clientDistPath, 'index.html'));
+        });
+      }
+
+      app.listen(PORT, '0.0.0.0', () => {
+        console.log(`Server running on http://localhost:${PORT}`);
+        console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+      });
+    })();
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server running on http://localhost:${PORT}`);
-    console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
-  });
-}
-
-startServer();
+export default app;

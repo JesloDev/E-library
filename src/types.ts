@@ -22,7 +22,6 @@ export enum BookCategory {
 export interface Book {
   id: string;
   title: string;
-  author: string;
   category: BookCategory;
   description: string;
   coverUrl: string;

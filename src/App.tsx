@@ -35,8 +35,15 @@ import {
   Trash2
 } from 'lucide-react';
 import * as pdfjsLib from 'pdfjs-dist';
+import { createClient } from '@supabase/supabase-js';
+import bcrypt from 'bcryptjs';
 import { Book, BookCategory, FilterState, User, RegistrationLink } from './types';
 import { INITIAL_BOOKS, DEPARTMENTS, LEVELS } from './constants';
+
+// Initialize Supabase Client
+const supabaseUrl = process.env.SUPABASE_URL || '';
+const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || '';
+const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
 // Set worker source for pdfjs
 pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
@@ -209,6 +216,8 @@ export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [view, setView] = useState<'login' | 'register' | 'library' | 'admin' | 'forgot-password' | 'profile'>('login');
   const [regToken, setRegToken] = useState<string | null>(null);
+  const [tokenVerifying, setTokenVerifying] = useState(false);
+  const [tokenError, setTokenError] = useState<string | null>(null);
   const [showMobileAuth, setShowMobileAuth] = useState(() => {
     return localStorage.getItem('dlcf_slideshow_seen') === 'true';
   });
@@ -338,16 +347,47 @@ export default function App() {
 
   // Check for registration token in URL
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const token = params.get('token');
-    if (token) {
-      setRegToken(token);
-      setView('register');
-    }
+    const checkToken = async () => {
+      const params = new URLSearchParams(window.location.search);
+      const token = params.get('token');
+      if (token) {
+        setTokenVerifying(true);
+        setTokenError(null);
+        try {
+          const { data: isValid, error } = await supabase.rpc('verify_registration_token', { lookup_token: token });
+          if (error || !isValid) {
+            console.error('Token verification error:', error);
+            const errMsg = 'Invalid or expired registration link. Please contact your DLCF admin.';
+            setTokenError(errMsg);
+            showToast(errMsg, 'error');
+            setView('login');
+            // Clean up url query param so user doesn't get stuck
+            window.history.replaceState({}, '', window.location.pathname);
+          } else {
+            setRegToken(token);
+            setView('register');
+          }
+        } catch (err) {
+          console.error('Error verifying token:', err);
+          setTokenError('Failed to verify registration link.');
+          setView('login');
+          window.history.replaceState({}, '', window.location.pathname);
+        } finally {
+          setTokenVerifying(false);
+        }
+      }
+    };
+    checkToken();
   }, []);
 
   // Restore session from localStorage on mount
   useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('token')) {
+      // If visiting a registration link, do not restore the existing session to avoid redirecting
+      return;
+    }
+
     const savedUser = localStorage.getItem('dlcf_user');
     if (savedUser) {
       try {
@@ -365,21 +405,64 @@ export default function App() {
   const handleLogin = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const formData = new FormData(e.currentTarget);
-    const email = formData.get('email');
-    const password = formData.get('password');
+    const email = formData.get('email') as string;
+    const password = formData.get('password') as string;
 
+    setLoading(true);
     try {
+      // 1. Try logging in via standard Supabase Auth
+      const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
+
+      if (!authError && authData.user) {
+        // Fetch user profile details from public.users table (allowed via RLS select policy auth.uid() = id)
+        const { data: userProfile, error: profileError } = await supabase
+          .from('users')
+          .select('*')
+          .eq('id', authData.user.id)
+          .single();
+
+        if (profileError || !userProfile) {
+          console.error('Failed to retrieve user profile:', profileError);
+          showToast('Could not retrieve user profile.', 'error');
+          await supabase.auth.signOut();
+          return;
+        }
+
+        // Verify approval status
+        if (!userProfile.is_approved && !userProfile.is_admin) {
+          await supabase.auth.signOut();
+          setRevokedModal({ 
+            message: 'Your access to the DLCF E-Library has been revoked by the administrator. Please contact the admin team if you believe this is an error.' 
+          });
+          return;
+        }
+
+        const loggedUser = {
+          id: userProfile.id,
+          email: userProfile.email,
+          name: userProfile.name,
+          isAdmin: !!userProfile.is_admin,
+          isSuperAdmin: !!userProfile.is_super_admin
+        };
+
+        setUser(loggedUser);
+        localStorage.setItem('dlcf_user', JSON.stringify(loggedUser));
+        setView(loggedUser.isAdmin ? 'admin' : 'library');
+        showToast(`Welcome back, ${loggedUser.name}!`);
+        return;
+      }
+
+      // 2. Fallback to Express backend login endpoint (for pre-migration/legacy users)
+      console.log('Standard Supabase Auth failed or profile missing. Trying legacy fallback...');
       const res = await fetch('/api/auth/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password }),
       });
       
-      if (res.status === 404) {
-        showToast('Login API not found. Please ensure the server is running correctly.', 'error');
-        return;
-      }
-
       const data = await res.json();
       if (res.ok) {
         setUser(data.user);
@@ -390,40 +473,73 @@ export default function App() {
         if (res.status === 403 && data.error === 'Access Revoked') {
           setRevokedModal({ message: data.message });
         } else {
-          showToast(data.error || 'Login failed', 'error');
+          showToast(data.error || authError?.message || 'Login failed', 'error');
         }
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error('Login error:', err);
-      showToast('Could not connect to the server. Please wait a moment and try again.', 'error');
+      showToast(err.message || 'Login failed', 'error');
+    } finally {
+      setLoading(false);
     }
   };
 
   const handleRegister = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const formData = new FormData(e.currentTarget);
-    const email = formData.get('email');
-    const password = formData.get('password');
-    const name = formData.get('name');
+    const email = formData.get('email') as string;
+    const password = formData.get('password') as string;
+    const name = formData.get('name') as string;
 
+    setLoading(true);
     try {
-      const res = await fetch('/api/auth/register', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password, name, token: regToken }),
+      // 1. Sign up user via standard Supabase Auth
+      const { data: authData, error: authError } = await supabase.auth.signUp({
+        email,
+        password,
       });
-      const data = await res.json();
-      if (res.ok) {
-        showToast('Registration successful! Please wait for admin approval.');
-        setView('login');
-        setShowPassword(false);
-        setRegToken(null);
-        window.history.replaceState({}, '', window.location.pathname);
-      } else {
-        showToast(data.error, 'error');
+
+      if (authError) {
+        showToast(authError.message, 'error');
+        return;
       }
-    } catch (err) {
-      showToast('Registration failed', 'error');
+
+      if (!authData.user) {
+        showToast('Registration failed - no user returned', 'error');
+        return;
+      }
+
+      // 2. Hash the password to satisfy the public.users NOT NULL database constraint
+      const hashedPassword = await bcrypt.hash(password, 10);
+
+      // 3. Insert profile record into public.users table (allowed via RLS insert policy)
+      const { error: insertError } = await supabase
+        .from('users')
+        .insert([{
+          id: authData.user.id,
+          email,
+          password: hashedPassword,
+          name,
+          is_approved: true, // Keep original auto-approved behavior
+          is_admin: false
+        }]);
+
+      if (insertError) {
+        console.error('Failed to create user profile in DB:', insertError.message);
+        showToast('Profile creation failed: ' + insertError.message, 'error');
+        return;
+      }
+
+      showToast('Registration successful! Please sign in.');
+      setView('login');
+      setShowPassword(false);
+      setRegToken(null);
+      window.history.replaceState({}, '', window.location.pathname);
+    } catch (err: any) {
+      console.error('Registration error:', err);
+      showToast(err.message || 'Registration failed', 'error');
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -432,6 +548,9 @@ export default function App() {
     setLoading(true);
     
     try {
+      // Sign out from Supabase Auth
+      await supabase.auth.signOut();
+
       // Call server to invalidate session
       if (user) {
         const response = await fetch('/api/auth/logout', {
@@ -839,70 +958,81 @@ export default function App() {
     const file = formData.get('pdf_file') as File;
     
     if (!file) {
-      showToast('Please select a PDF file', 'error');
+      showToast('Please select a file', 'error');
       return;
     }
 
     setLoading(true);
-    setUploadProgress('Generating thumbnail...');
+    setUploadProgress('Uploading document...');
 
     try {
-      // 1. Generate Thumbnail from PDF
-      const arrayBuffer = await file.arrayBuffer();
-      const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
-      const page = await pdf.getPage(1);
-      const viewport = page.getViewport({ scale: 0.5 });
-      const canvas = document.createElement('canvas');
-      const context = canvas.getContext('2d');
-      canvas.height = viewport.height;
-      canvas.width = viewport.width;
-      
-      if (context) {
-        await page.render({ canvasContext: context, viewport } as any).promise;
-      }
-      
-      const thumbnailBlob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.8));
-      if (!thumbnailBlob) throw new Error('Failed to generate thumbnail');
+      const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+      let coverUrl = 'https://picsum.photos/seed/book/400/600'; // Default cover
 
-      // 2. Upload PDF
-      setUploadProgress('Uploading PDF...');
-      const pdfUploadFormData = new FormData();
-      pdfUploadFormData.append('file', file);
-      const pdfRes = await fetch('/api/admin/upload', {
+      // 1. Upload Document First
+      setUploadProgress('Uploading file to cloud storage...');
+      const docUploadFormData = new FormData();
+      docUploadFormData.append('file', file);
+      const docRes = await fetch('/api/admin/upload', {
         method: 'POST',
-        body: pdfUploadFormData
+        body: docUploadFormData
       });
       
-      let pdfData;
-      const pdfText = await pdfRes.text();
+      let docData;
+      const docText = await docRes.text();
       try {
-        pdfData = JSON.parse(pdfText);
+        docData = JSON.parse(docText);
       } catch (e) {
-        throw new Error(`Server returned non-JSON response during PDF upload (${pdfRes.status})`);
+        throw new Error(`Server returned non-JSON response during file upload (${docRes.status})`);
       }
       
-      if (!pdfRes.ok) throw new Error(pdfData.error || 'PDF upload failed');
+      if (!docRes.ok) throw new Error(docData.error || 'File upload failed');
 
-      // 3. Upload Thumbnail
-      setUploadProgress('Uploading thumbnail...');
-      const thumbUploadFormData = new FormData();
-      thumbUploadFormData.append('file', new File([thumbnailBlob], 'thumbnail.jpg', { type: 'image/jpeg' }));
-      const thumbRes = await fetch('/api/admin/upload', {
-        method: 'POST',
-        body: thumbUploadFormData
-      });
-      
-      let thumbData;
-      const thumbText = await thumbRes.text();
-      try {
-        thumbData = JSON.parse(thumbText);
-      } catch (e) {
-        throw new Error(`Server returned non-JSON response during thumbnail upload (${thumbRes.status})`);
+      // 2. Generate Thumbnail from PDF (only if it is a PDF)
+      if (isPdf) {
+        setUploadProgress('Generating PDF thumbnail...');
+        try {
+          const arrayBuffer = await file.arrayBuffer();
+          const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+          const page = await pdf.getPage(1);
+          const viewport = page.getViewport({ scale: 0.5 });
+          const canvas = document.createElement('canvas');
+          const context = canvas.getContext('2d');
+          canvas.height = viewport.height;
+          canvas.width = viewport.width;
+          
+          if (context) {
+            await page.render({ canvasContext: context, viewport } as any).promise;
+          }
+          
+          const thumbnailBlob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.8));
+          if (thumbnailBlob) {
+            setUploadProgress('Uploading thumbnail...');
+            const thumbUploadFormData = new FormData();
+            thumbUploadFormData.append('file', new File([thumbnailBlob], 'thumbnail.jpg', { type: 'image/jpeg' }));
+            const thumbRes = await fetch('/api/admin/upload', {
+              method: 'POST',
+              body: thumbUploadFormData
+            });
+            const thumbData = await thumbRes.json();
+            if (thumbRes.ok && thumbData.url) {
+              coverUrl = thumbData.url;
+            }
+          }
+        } catch (e) {
+          console.warn('Could not generate PDF thumbnail, using default cover:', e);
+        }
+      } else {
+        // Use generic placeholders based on extension
+        const ext = file.name.split('.').pop()?.toLowerCase();
+        if (ext === 'doc' || ext === 'docx') {
+          coverUrl = 'https://images.unsplash.com/photo-1586075010923-2dd4570fb338?w=400&q=80'; // Word document look
+        } else if (ext === 'ppt' || ext === 'pptx') {
+          coverUrl = 'https://images.unsplash.com/photo-1596495578065-6e0763fa1141?w=400&q=80'; // Presentation look
+        }
       }
-      
-      if (!thumbRes.ok) throw new Error(thumbData.error || 'Thumbnail upload failed');
 
-      // 4. Save Book Record
+      // 3. Save Book Record
       setUploadProgress('Saving record...');
       const category = formData.get('category') as BookCategory;
       const title = category === BookCategory.ACADEMIC 
@@ -925,15 +1055,20 @@ export default function App() {
 
       const bookData = {
         title,
-        author: 'DLCF Library', // Default author
         category,
-        cover_url: thumbData.url,
-        download_url: pdfData.url,
+        cover_url: coverUrl,
+        download_url: docData.url,
         department: formData.get('department'),
         level: formData.get('level'),
         course_code: formData.get('course_code'),
         course_title: formData.get('course_title'),
-        material_type: detectedMaterialType
+        material_type: detectedMaterialType,
+        // Added metadata fields:
+        file_key: docData.file_key,
+        file_name: docData.file_name,
+        mime_type: docData.mime_type,
+        file_size: docData.file_size,
+        uploader_id: user?.id
       };
 
       const res = await fetch('/api/admin/books', {
@@ -1053,14 +1188,13 @@ export default function App() {
 
     const updates: any = {
       title,
-      author: formData.get('author'),
       category,
-      department: formData.get('department'),
-      level: formData.get('level'),
+      department: formData.get('department') || '',
+      level: formData.get('level') || '',
       course_code: courseCode,
-      course_title: formData.get('course_title'),
+      course_title: formData.get('course_title') || '',
       material_type: detectedMaterialType,
-      description: formData.get('description'),
+      description: formData.get('description') || editingBook.description || '',
     };
 
     setLoading(true);
@@ -1103,7 +1237,16 @@ export default function App() {
       const res = await fetch('/api/admin/mass-upload-gdrive', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ folderId, department, level, category, courseCode, courseTitle, materialType }),
+        body: JSON.stringify({ 
+          folderId, 
+          department, 
+          level, 
+          category, 
+          courseCode, 
+          courseTitle, 
+          materialType,
+          uploaderId: user?.id
+        }),
       });
       const data = await res.json();
       if (res.ok) {
@@ -1124,7 +1267,6 @@ export default function App() {
     return books.filter((book) => {
       const matchesSearch = 
         book.title.toLowerCase().includes(filters.search.toLowerCase()) ||
-        book.author.toLowerCase().includes(filters.search.toLowerCase()) ||
         book.courseCode?.toLowerCase().includes(filters.search.toLowerCase()) ||
         book.courseTitle?.toLowerCase().includes(filters.search.toLowerCase());
       
@@ -1145,8 +1287,7 @@ export default function App() {
   const groupedAdminBooks = useMemo<{ [key: string]: Book[] }>(() => {
     const filtered = books.filter(b => 
       b.title.toLowerCase().includes(adminBookSearch.toLowerCase()) ||
-      (b.courseCode || '').toLowerCase().includes(adminBookSearch.toLowerCase()) ||
-      (b.author || '').toLowerCase().includes(adminBookSearch.toLowerCase())
+      (b.courseCode || '').toLowerCase().includes(adminBookSearch.toLowerCase())
     );
 
     const groups: { [key: string]: Book[] } = {};
@@ -1164,18 +1305,19 @@ export default function App() {
     const groups: Record<string, { code: string, title: string, count: number, department: string, level: string, coverUrl: string }> = {};
     
     filteredBooks.forEach(book => {
-      if (book.category === BookCategory.ACADEMIC && book.courseCode) {
-        if (!groups[book.courseCode]) {
-          groups[book.courseCode] = {
-            code: book.courseCode,
-            title: book.courseTitle || book.title,
+      if (book.category === BookCategory.ACADEMIC) {
+        const code = book.courseCode || 'GENERAL';
+        if (!groups[code]) {
+          groups[code] = {
+            code: code,
+            title: book.courseTitle || (code === 'GENERAL' ? 'General Materials' : book.title),
             count: 0,
             department: book.department || '',
             level: book.level || '',
-            coverUrl: book.coverUrl
+            coverUrl: book.coverUrl || 'https://picsum.photos/seed/book/400/600'
           };
         }
-        groups[book.courseCode].count++;
+        groups[code].count++;
       }
     });
     
@@ -1202,6 +1344,21 @@ export default function App() {
 
   // --- Views ---
 
+  if (tokenVerifying) {
+    return (
+      <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
+        <div className="flex flex-col items-center max-w-sm text-center">
+          <div className="w-16 h-16 rounded-2xl mb-6 shadow-lg overflow-hidden border-2 border-emerald-500 bg-white flex items-center justify-center animate-pulse">
+            <img src={dlcfLogo} alt="DLCF Logo" className="w-full h-full object-cover" />
+          </div>
+          <Loader2 className="w-8 h-8 text-emerald-500 animate-spin mb-4" />
+          <h2 className="text-xl font-bold text-white mb-2">Verifying Registration Link</h2>
+          <p className="text-slate-400 text-sm">Please wait while we check your access link...</p>
+        </div>
+      </div>
+    );
+  }
+
   if (view === 'login') {
     return (
       <AuthLayout showMobileAuth={showMobileAuth} onContinueMobile={() => { setShowMobileAuth(true); localStorage.setItem('dlcf_slideshow_seen', 'true'); }}>
@@ -1218,6 +1375,16 @@ export default function App() {
             <h1 className="text-2xl font-bold text-slate-800">Welcome Back</h1>
             <p className="text-slate-500 text-sm">Sign in to access the DLCF E-Library</p>
           </div>
+
+          {tokenError && (
+            <div className="mb-6 p-4 bg-rose-50 border border-rose-100 rounded-2xl flex items-start gap-3 text-rose-800 text-sm animate-bounce">
+              <ShieldAlert className="w-5 h-5 text-rose-500 flex-shrink-0 mt-0.5" />
+              <div>
+                <p className="font-semibold">Invalid Access Link</p>
+                <p className="text-rose-600/90 text-xs mt-0.5">{tokenError}</p>
+              </div>
+            </div>
+          )}
 
           <form onSubmit={handleLogin} className="space-y-4">
             <div>
@@ -1264,7 +1431,7 @@ export default function App() {
           <div className="mt-4 text-center">
             <button 
               onClick={() => setView('forgot-password')}
-              className="text-sm text-slate-500 hover:text-emerald-600 transition-colors cursor-pointer"
+              className="text-sm text-emerald-600 hover:text-emerald-700 hover:underline font-semibold transition-all cursor-pointer"
             >
               Forgot Password?
             </button>
@@ -1348,7 +1515,7 @@ export default function App() {
           
           <button 
             onClick={() => { setView('login'); setShowPassword(false); }}
-            className="w-full mt-4 text-sm text-slate-500 hover:text-emerald-600 transition-colors cursor-pointer"
+            className="w-full mt-4 text-sm text-emerald-600 hover:text-emerald-700 hover:underline font-semibold transition-all cursor-pointer"
           >
             Already have an account? Sign In
           </button>
@@ -1396,7 +1563,7 @@ export default function App() {
           
           <button 
             onClick={() => setView('login')}
-            className="w-full mt-4 text-sm text-slate-500 hover:text-emerald-600 transition-colors cursor-pointer"
+            className="w-full mt-4 text-sm text-emerald-600 hover:text-emerald-700 hover:underline font-semibold transition-all cursor-pointer"
           >
             Back to Login
           </button>
@@ -1988,14 +2155,14 @@ export default function App() {
                     )}
 
                     <div>
-                      <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1.5 ml-1">PDF File</label>
+                      <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1.5 ml-1">Document File</label>
                       <div className="relative">
                         <input 
                           type="file" 
                           name="pdf_file" 
-                          accept=".pdf" 
+                          accept=".pdf,.doc,.docx,.ppt,.pptx,.txt" 
                           required 
-                          className="hidden" 
+                          className="sr-only" 
                           id="pdf-upload"
                           onChange={(e) => {
                             const file = e.target.files?.[0];
@@ -2010,7 +2177,7 @@ export default function App() {
                           className="flex items-center gap-3 w-full px-4 py-3 bg-slate-50 border border-dashed border-slate-300 rounded-xl text-sm cursor-pointer hover:bg-slate-100 transition-colors"
                         >
                           <FileUp className="w-5 h-5 text-slate-400" />
-                          <span id="pdf-label" className="text-slate-500 truncate">Select PDF from local storage</span>
+                          <span id="pdf-label" className="text-slate-500 truncate">Select document from local storage (.pdf, .docx, .pptx, etc.)</span>
                         </label>
                       </div>
                     </div>
@@ -2114,7 +2281,7 @@ export default function App() {
                                   </div>
                                 </div>
                               </div>
-                              <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                              <div className="flex items-center gap-1 opacity-100 lg:opacity-0 lg:group-hover:opacity-100 transition-opacity">
                                 <button 
                                   onClick={() => setEditingBook(book)}
                                   className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-xl transition-all"
@@ -2160,7 +2327,7 @@ export default function App() {
                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
                     <input 
                       type="text"
-                      placeholder="Title, author, code..."
+                      placeholder="Title, course code, course title..."
                       className="w-full pl-10 pr-4 py-2 bg-white border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all"
                       value={filters.search}
                       onChange={(e) => setFilters({ ...filters, search: e.target.value })}
@@ -2242,7 +2409,7 @@ export default function App() {
                       filters.category === 'All' ? 'All Resources' : filters.category
                     )}
                     <span className="ml-2 text-sm font-normal text-slate-400">
-                      ({selectedCourse ? filteredBooks.filter(b => b.courseCode === selectedCourse).length : 
+                      ({selectedCourse ? filteredBooks.filter(b => (b.courseCode || 'GENERAL') === selectedCourse).length : 
                         (filters.category === BookCategory.ACADEMIC ? groupedCourses.length : filteredBooks.length)} 
                       {filters.category !== BookCategory.ACADEMIC ? ' items' : (selectedCourse ? ' items' : ' courses')})
                     </span>
@@ -2300,7 +2467,7 @@ export default function App() {
                     filteredBooks
                       .filter(b => {
                         if (filters.category === BookCategory.CHRISTIAN_NOVEL) return true;
-                        return b.courseCode === selectedCourse;
+                        return (b.courseCode || 'GENERAL') === selectedCourse;
                       })
                       .map((book) => (
                     <motion.a
@@ -2350,7 +2517,6 @@ export default function App() {
                           )}
                         </div>
                         <h3 className="text-sm sm:text-base font-bold text-slate-800 line-clamp-1 group-hover:text-emerald-600 transition-colors">{book.title}</h3>
-                        <p className="text-[10px] sm:text-sm text-slate-500 mb-2 sm:mb-3">{book.author}</p>
                         
                         {book.category === BookCategory.ACADEMIC && (
                           <div className="flex items-center gap-2 text-[9px] sm:text-[11px] text-slate-400 border-t border-slate-100 pt-2 sm:pt-3">
@@ -2371,7 +2537,7 @@ export default function App() {
               </div>
 
               {((filters.category === BookCategory.ACADEMIC && !selectedCourse && groupedCourses.length === 0) || 
-                (selectedCourse && filteredBooks.filter(b => b.courseCode === selectedCourse).length === 0) ||
+                (selectedCourse && filteredBooks.filter(b => (b.courseCode || 'GENERAL') === selectedCourse).length === 0) ||
                 (filters.category === BookCategory.CHRISTIAN_NOVEL && filteredBooks.length === 0)) && (
                 <div className="flex flex-col items-center justify-center py-20 bg-white rounded-3xl border border-dashed border-slate-200">
                   <div className="bg-slate-50 p-4 rounded-full mb-4">
@@ -2532,7 +2698,7 @@ export default function App() {
                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
                     <input 
                       type="text"
-                      placeholder="Title, author, code..."
+                      placeholder="Title, course code, course title..."
                       className="w-full pl-10 pr-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/20"
                       value={filters.search}
                       onChange={(e) => setFilters({ ...filters, search: e.target.value })}

@@ -62,7 +62,6 @@ CREATE TABLE registration_links (
 CREATE TABLE books (
   id UUID PRIMARY KEY,
   title TEXT NOT NULL,
-  author TEXT NOT NULL,
   category TEXT NOT NULL, -- 'Academic' or 'Christian Novel'
   description TEXT,
   cover_url TEXT,
